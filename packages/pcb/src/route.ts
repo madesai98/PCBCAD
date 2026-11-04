@@ -3,28 +3,30 @@
  *
  * Model
  *  - Nodes are grid points (pitch `grid`, aligned to multiples of the pitch) on each routing layer.
- *  - Obstacles (other-net pads, traces, vias, holes, board edge) are rasterised per *trace class*
- *    (distinct half-widths) into count grids: a node is blocked when its centre is closer than
+ *  - Obstacles (pads, traces, vias, holes, board edge) are rasterised per *trace class* (distinct
+ *    half-widths) into count grids: a node is blocked when its centre is closer than
  *    clearance + halfWidth + m to obstacle copper, where m is chosen so that any straight move between
  *    two free nodes is clearance-safe (two discs of radius √(D² + L²/4) cover the stadium of radius D
  *    around a move of length L). Orthogonal and diagonal moves use separate margins.
- *  - Counts are additive, so committing / ripping up a route is exact (+1 / −1). Own-net copper is
- *    excluded by temporarily subtracting it before building the per-net "effective" maps.
+ *  - Counts are additive, so committing / ripping up a route is exact (+1 / −1). While a net is being
+ *    routed its own copper is subtracted from the grids ("session"), so A* reads them directly.
+ *  - Fixed copper and router-placed copper live in separate grids: in rip-up mode router-placed
+ *    copper of other nets may be crossed at a penalty; the crossed nets are ripped up and re-queued.
  *  - Vias are point obstacles checked on every stackup layer, keep hole-to-hole spacing and are never
  *    placed in SMD pads.
  * Search
- *  - Each net is connected island by island (Prim order): sources = the new island's copper cells,
- *    targets = all copper of the growing tree (pads, earlier routes, existing traces/vias), so the
- *    result is a Steiner-like tree. Pads are entered anywhere inside their copper.
- *  - Costs: length, layer direction preference (top horizontal, bottom vertical...), bends, vias,
- *    history (congestion) costs. Failed connections fall back to a narrower width, then
- *    rip-up-and-reroute passes allow crossing other routes at a penalty and rip the victims.
+ *  - Each net is connected island by island (Prim order): sources = the new island's copper,
+ *    targets = all copper of the growing tree (pads, earlier routes, existing traces/vias), giving a
+ *    Steiner-like tree. Pads are entered anywhere inside their copper; off-grid fine-pitch pads get an
+ *    exactly-checked stub.
+ *  - Costs: length, layer direction preference (top horizontal, bottom vertical, ...), bends, vias,
+ *    congestion history. Failed connections retry with narrower widths (trace width, then the minimum).
  *  - Every committed segment/via is finally verified exactly against all other-net copper.
  */
 import { newId, type Board, type CopperLayer, type PartDef, type Trace, type Vec2, type Via } from '@pcbcad/core';
 import { analyzeConnectivity } from './connectivity';
 import { HOLE_TO_HOLE } from './constants';
-import { bbInflate, makePrim, nowMs, polylineLength, primGap, primPtDist, type Prim } from './geom';
+import { bbInflate, distPtSeg2, makePrim, nowMs, polylineLength, primGap, primPtDist, type Prim } from './geom';
 import { allLayersMask, boardBBox, boardEdges, buildCopperModel, holeCopperPrim, layerBit, netTraceWidth, stackLayers, tracePrims, viaMask, type PadInfo } from './model';
 import { GridIndex } from './spatial';
 import { fillZonesInPlace } from './zones';
@@ -40,7 +42,7 @@ export interface AutoRouteOptions {
   grid?: number;
   /** Time budget (ms). Default 30 000. */
   maxTimeMs?: number;
-  /** Rip-up-and-reroute passes after the first pass. Default 4. */
+  /** Rip-up-and-reroute passes after the first pass (only run while connections fail). Default 20. */
   ripupPasses?: number;
   /** Cost of a via in mm of trace length. Default max(1, 6·grid). */
   viaCost?: number;
@@ -60,17 +62,19 @@ const DY = [0, 1, 1, 1, 0, -1, -1, -1];
 const BEND = [0, 0.08, 0.3, 1.5, 4];
 const EPSR = 1e-4;
 const MAX_CELLS = 3_000_000;
+/** Penalty (mm) for entering a node blocked only by another net's router-placed copper (rip-up mode). */
+const SOFT_PENALTY = 4;
 
 interface TraceClass {
   hw: number;
   mO: number;
   mD: number;
+  /** per routing layer: counts of fixed obstacles within the orthogonal / diagonal threshold */
   fixO: Uint16Array[];
   fixD: Uint16Array[];
+  /** per routing layer: counts of router-placed copper */
   softO: Uint16Array[];
   softD: Uint16Array[];
-  effO: Uint8Array[];
-  effD: Uint8Array[];
 }
 
 interface Obst {
@@ -112,8 +116,8 @@ interface NetState {
   idx: number;
   id: string;
   name: string;
-  cls: number;
-  fb: number;
+  /** trace class indices: preferred width first, then narrower fallbacks */
+  classes: number[];
   islands: RIsland[];
   own: Obst[];
   segs: RSeg[];
@@ -122,7 +126,6 @@ interface NetState {
   viaObjs: Via[];
   unplaced: string[];
   len: number;
-  touched: boolean;
 }
 
 interface Term {
@@ -163,7 +166,6 @@ class Router {
   private viaDrill: number;
   private viaFix: Uint16Array[] = [];
   private viaSoft: Uint16Array[] = [];
-  private effV!: Uint8Array;
   private drillBlock!: Uint16Array;
   private viaKeep!: Uint8Array;
   private hist!: Float32Array;
@@ -186,11 +188,13 @@ class Router {
   private maxClr = 0;
   private nets: NetState[] = [];
   private netIdx = new Map<string, number>();
+  private session: NetState | null = null;
   private readonly deadline: number;
   private readonly viaCost: number;
   private timedOut = false;
   private readonly tmp: number[] = [];
-  private readonly warnings: string[] = [];
+  /** Diagnostics: searches run and nodes expanded. */
+  readonly counters = { searches: 0, expanded: 0 };
 
   constructor(
     private readonly board: Board,
@@ -224,13 +228,12 @@ class Router {
     };
     const only = this.opts.nets?.length ? resolve(this.opts.nets) : null;
     const skip = resolve(this.opts.skipNets);
-    // routing layers
     const want = this.opts.layers?.length ? new Set(this.opts.layers) : null;
     this.rLayers = this.stack.map((l, i) => (want && !want.has(l) ? -1 : i)).filter((i) => i >= 0);
     this.nL = this.rLayers.length;
     this.rLayers.forEach((s, rl) => (this.layerToRl[s] = rl));
 
-    // which nets need routing (zones count for "already connected")
+    // which nets need routing (zone fills count as connections)
     const full = analyzeConnectivity(board, this.parts);
     const noZoneModel = buildCopperModel(board, this.parts, { zones: false });
     const conn = analyzeConnectivity(board, this.parts, noZoneModel);
@@ -246,7 +249,6 @@ class Router {
     }
 
     this.setupGrid();
-    // net indices: 0 = no net
     board.nets.forEach((n) => this.netIdx.set(n.id, this.netIdx.size + 1));
     const nidx = (id: string) => {
       if (!id) return 0;
@@ -257,38 +259,45 @@ class Router {
       }
       return v;
     };
-    // trace classes
-    const hwOf = new Map<string, { hw: number; fb: number }>();
+    // trace classes: preferred width, then rules.traceWidth, then rules.minTraceWidth
+    const widthsOf = new Map<string, number[]>();
     const hws = new Set<number>();
+    const minHw = Math.max(0.01, this.rules.minTraceWidth / 2);
     for (const id of todo) {
-      const hw = Math.max(this.rules.minTraceWidth, netTraceWidth(board, id)) / 2;
-      let fb = -1;
-      if (hw > this.rules.traceWidth / 2 + 1e-9) fb = this.rules.traceWidth / 2;
-      else if (hw > this.rules.minTraceWidth / 2 + 1e-9) fb = this.rules.minTraceWidth / 2;
-      hwOf.set(id, { hw, fb });
-      hws.add(hw);
-      if (fb > 0) hws.add(fb);
+      const hw = Math.max(minHw, netTraceWidth(board, id) / 2);
+      const list = [hw];
+      for (const f of [this.rules.traceWidth / 2, minHw]) if (f > 0 && f < list[list.length - 1] - 1e-9) list.push(f);
+      widthsOf.set(id, list);
+      for (const w of list) hws.add(w);
     }
     const hwList = [...hws].sort((a, b) => a - b);
     const cmin = Math.max(1e-3, Math.min(this.rules.clearance, this.rules.edgeClearance));
+    const outside = this.outside;
     for (const hw of hwList) {
       const D = cmin + hw;
-      const mk = () => Array.from({ length: this.nL }, () => new Uint16Array(this.NC));
+      const fixed = () =>
+        Array.from({ length: this.nL }, () => {
+          const a = new Uint16Array(this.NC);
+          for (let i = 0; i < this.NC; i++) a[i] = outside[i];
+          return a;
+        });
+      const zero = () => Array.from({ length: this.nL }, () => new Uint16Array(this.NC));
       this.classes.push({
         hw,
         mO: Math.sqrt(D * D + (this.g * this.g) / 4) - D,
         mD: Math.sqrt(D * D + (this.g * this.g) / 2) - D,
-        fixO: mk(),
-        fixD: mk(),
-        softO: mk(),
-        softD: mk(),
-        effO: Array.from({ length: this.nL }, () => new Uint8Array(this.NC)),
-        effD: Array.from({ length: this.nL }, () => new Uint8Array(this.NC)),
+        fixO: fixed(),
+        fixD: fixed(),
+        softO: zero(),
+        softD: zero(),
       });
     }
-    this.viaFix = Array.from({ length: this.nS }, () => new Uint16Array(this.NC));
+    this.viaFix = Array.from({ length: this.nS }, () => {
+      const a = new Uint16Array(this.NC);
+      for (let i = 0; i < this.NC; i++) a[i] = outside[i];
+      return a;
+    });
     this.viaSoft = Array.from({ length: this.nS }, () => new Uint16Array(this.NC));
-    this.effV = new Uint8Array(this.NC);
     this.drillBlock = new Uint16Array(this.NC);
     this.viaKeep = new Uint8Array(this.NC);
     const N = this.NC * this.nL;
@@ -319,7 +328,7 @@ class Router {
       if (!p.placed) continue;
       if (p.prim) addFixed({ prim: p.prim, layers: p.layers, clr, net: nidx(p.netId) });
       else if (p.hole) addFixed({ prim: p.hole, layers: this.allMask, clr, net: 0 });
-      if (p.hole) this.addDrill(p.hole, 1);
+      if (p.hole) this.addDrill(p.hole);
       if (p.prim && p.pad.kind === 'smd') this.markViaKeep(p.prim);
     }
     for (const t of board.traces ?? []) {
@@ -329,23 +338,22 @@ class Router {
     }
     for (const v of board.vias ?? []) {
       addFixed({ prim: makePrim([[v.x, v.y]], Math.max(v.diameter, v.drill) / 2), layers: viaMask(this.stack, v), clr, net: nidx(v.netId) });
-      this.addDrill(makePrim([[v.x, v.y]], v.drill / 2), 1);
+      this.addDrill(makePrim([[v.x, v.y]], v.drill / 2));
     }
     for (const h of board.holes ?? []) {
       const cu = holeCopperPrim(h);
       if (cu) addFixed({ prim: cu, layers: this.allMask, clr, net: nidx(h.netId ?? '') });
       else addFixed({ prim: makePrim([[h.x, h.y]], h.drill / 2), layers: this.allMask, clr, net: 0 });
-      this.addDrill(makePrim([[h.x, h.y]], h.drill / 2), 1);
+      this.addDrill(makePrim([[h.x, h.y]], h.drill / 2));
     }
     for (const [a, b] of boardEdges(board)) addFixed({ prim: makePrim([a, b], 0), layers: this.allMask, clr: this.rules.edgeClearance, net: 0 });
 
     // net states
     for (const id of todo) {
       const idx = nidx(id);
-      const islandsAll = conn.nets.get(id) ?? [];
       const unplaced = new Set<string>();
       const islands: RIsland[] = [];
-      for (const isl of islandsAll) {
+      for (const isl of conn.nets.get(id) ?? []) {
         const pads: PadInfo[] = [];
         const copper: { prim: Prim; layers: number }[] = [];
         for (const itId of isl.items) {
@@ -360,13 +368,11 @@ class Router {
         for (const c of copper) if (c.prim.pts.length <= 2) anchors.push(c.prim.pts[0]);
         islands.push({ pads, copper, anchors, inTree: false, failed: null });
       }
-      const w = hwOf.get(id)!;
       const ns: NetState = {
         idx,
         id,
         name: netName(id),
-        cls: hwList.indexOf(w.hw),
-        fb: w.fb > 0 ? hwList.indexOf(w.fb) : -1,
+        classes: widthsOf.get(id)!.map((w) => hwList.indexOf(w)),
         islands,
         own: ownByNet.get(idx) ?? [],
         segs: [],
@@ -375,7 +381,6 @@ class Router {
         viaObjs: [],
         unplaced: [...unplaced].sort(),
         len: mstLength(islands.map((i) => i.anchors[0])),
-        touched: false,
       };
       const net = board.nets.find((n) => n.id === id);
       if (net && (net.class === 'power' || net.class === 'ground')) ns.len *= 0.6;
@@ -389,16 +394,15 @@ class Router {
       this.connectNet(ns, false);
     }
     // rip-up and reroute
-    const passes = this.opts.ripupPasses ?? 4;
+    const passes = this.opts.ripupPasses ?? 20;
     for (let pass = 0; pass < passes && !this.timeUp(); pass++) {
-      const failing = this.nets.filter((n) => n.islands.length > 1 && n.islands.some((i) => !i.inTree));
+      const failing = this.nets.filter((n) => n.islands.some((i) => !i.inTree) && n.islands.length > 1);
       if (!failing.length) break;
-      const requeue = new Set<NetState>();
+      const requeue: NetState[] = [];
       for (const ns of failing) {
         if (this.timeUp()) break;
         for (const isl of ns.islands) if (!isl.inTree) isl.failed = null;
-        const victims = this.connectNet(ns, true);
-        for (const v of victims) requeue.add(v);
+        for (const v of this.connectNet(ns, true)) if (!requeue.includes(v)) requeue.push(v);
       }
       for (const v of requeue) {
         if (this.timeUp()) break;
@@ -411,7 +415,6 @@ class Router {
       if (!this.verifyNet(ns)) {
         this.ripNet(ns);
         for (const isl of ns.islands) isl.failed = 'internal clearance verification failed';
-        this.warnings.push(`${ns.name}: route removed by verification`);
       }
     }
     // write back
@@ -429,9 +432,8 @@ class Router {
       for (const v of ns.viaObjs) board.vias.push(v);
       viaCount += ns.viaObjs.length;
     }
-    if ((board.zones ?? []).some((z) => z.fill && z.fill.length)) {
-      fillZonesInPlace(board, this.parts, new Set(board.zones.filter((z) => z.fill && z.fill.length).map((z) => z.id)));
-    }
+    const filled = (board.zones ?? []).filter((z) => z.fill && z.fill.length);
+    if (filled.length) fillZonesInPlace(board, this.parts, new Set(filled.map((z) => z.id)));
     const after = analyzeConnectivity(board, this.parts);
     const routed: string[] = [];
     for (const ns of this.nets) {
@@ -440,11 +442,11 @@ class Router {
         routed.push(ns.id);
         continue;
       }
-      let reason: string;
       const bad = ns.islands.find((i) => i.failed);
-      if (ns.unplaced.length && !bad) reason = `components not placed: ${ns.unplaced.join(', ')}`;
-      else if (this.timedOut && !bad) reason = 'time limit reached';
-      else reason = bad?.failed ?? (this.timedOut ? 'time limit reached' : 'could not connect all pads');
+      let reason: string;
+      if (ns.unplaced.length && (!bad || ns.islands.every((i) => i.inTree || !i.failed))) reason = `components not placed: ${ns.unplaced.join(', ')}`;
+      else if (bad?.failed) reason = bad.failed;
+      else reason = this.timedOut ? 'time limit reached' : 'could not connect all pads';
       const missing = islands.length - 1;
       failed.push({ netId: ns.id, name: ns.name, reason: `${missing} connection${missing > 1 ? 's' : ''} unrouted: ${reason}` });
     }
@@ -462,10 +464,7 @@ class Router {
     const bb = boardBBox(this.board);
     let g = this.g;
     const cells = () => ((bb.maxX - bb.minX) / g + 4) * ((bb.maxY - bb.minY) / g + 4);
-    if (cells() > MAX_CELLS) {
-      g = g * Math.sqrt(cells() / MAX_CELLS) * 1.01;
-      this.warnings.push(`grid coarsened to ${g.toFixed(3)} mm for a board this large`);
-    }
+    if (cells() > MAX_CELLS) g = g * Math.sqrt(cells() / MAX_CELLS) * 1.01;
     this.g = g;
     this.ox = Math.floor(bb.minX / g) * g - g;
     this.oy = Math.floor(bb.minY / g) * g - g;
@@ -555,16 +554,20 @@ class Router {
     });
   }
 
-  private addDrill(hole: Prim, delta: number): number {
-    const reach = this.viaDrill / 2 + HOLE_TO_HOLE + EPSR;
-    this.forCells(hole, reach, (cell) => (this.drillBlock[cell] += delta));
-    if (delta > 0) {
-      const id = this.drillItems.length;
-      this.drillItems.push({ prim: hole, alive: true });
-      this.drillIdx.insert(id, hole.bb);
-      return id;
-    }
-    return -1;
+  private addDrill(hole: Prim): number {
+    this.forCells(hole, this.viaDrill / 2 + HOLE_TO_HOLE + EPSR, (cell) => (this.drillBlock[cell] += 1));
+    const id = this.drillItems.length;
+    this.drillItems.push({ prim: hole, alive: true });
+    this.drillIdx.insert(id, hole.bb);
+    return id;
+  }
+
+  private removeDrill(id: number): void {
+    const d = this.drillItems[id];
+    if (!d || !d.alive) return;
+    d.alive = false;
+    this.drillIdx.remove(id, d.prim.bb);
+    this.forCells(d.prim, this.viaDrill / 2 + HOLE_TO_HOLE + EPSR, (cell) => (this.drillBlock[cell] -= 1));
   }
 
   private markViaKeep(prim: Prim): void {
@@ -603,17 +606,34 @@ class Router {
     return true;
   }
 
-  private viaHoleClear(x: number, y: number): boolean {
+  private viaHoleClear(x: number, y: number, ignore: number): boolean {
     const hole = makePrim([[x, y]], this.viaDrill / 2);
     const ids = this.drillIdx.query(bbInflate(hole.bb, HOLE_TO_HOLE + 1e-3), this.tmp);
     for (const id of ids) {
+      if (id === ignore) continue;
       const d = this.drillItems[id];
       if (d.alive && primGap(hole, d.prim) < HOLE_TO_HOLE - 1e-6) return false;
     }
     return true;
   }
 
-  /* ---------------------------------------------- net state --------------------------------------------- */
+  /* ----------------------------------------------- states ----------------------------------------------- */
+
+  /** Node state for a trace endpoint (orthogonal threshold): 0 free, 1 other routes (soft), 2 blocked. */
+  private stO(cl: TraceClass, rl: number, c: number): number {
+    return cl.fixO[rl][c] ? 2 : cl.softO[rl][c] ? 1 : 0;
+  }
+
+  /** Via state at a cell: 0 free, 1 soft, 2 blocked. */
+  private stV(c: number): number {
+    if (this.drillBlock[c] || this.viaKeep[c]) return 2;
+    let v = 0;
+    for (let s = 0; s < this.nS; s++) {
+      if (this.viaFix[s][c]) return 2;
+      if (this.viaSoft[s][c]) v = 1;
+    }
+    return v;
+  }
 
   private segObst(s: RSeg, net: number): Obst {
     return { prim: s.prim, layers: 1 << s.layer, clr: this.rules.clearance, net };
@@ -623,86 +643,61 @@ class Router {
     return { prim: v.prim, layers: this.allMask, clr: this.rules.clearance, net };
   }
 
-  /** Build effective blocked maps (0 free, 1 soft = other routes, 2 hard) for a net. */
-  private computeEff(ns: NetState): void {
+  /** Start routing a net: remove its own copper from the shared grids. */
+  private beginNet(ns: NetState): void {
     for (const o of ns.own) this.raster(o, false, -1);
     for (const s of ns.segs) this.raster(this.segObst(s, ns.idx), true, -1);
     for (const v of ns.vias) this.raster(this.viaObst(v, ns.idx), true, -1);
-    const outside = this.outside;
-    const NC = this.NC;
-    for (const k of [ns.cls, ns.fb]) {
-      if (k < 0) continue;
-      const c = this.classes[k];
-      for (let rl = 0; rl < this.nL; rl++) {
-        const fO = c.fixO[rl];
-        const fD = c.fixD[rl];
-        const sO = c.softO[rl];
-        const sD = c.softD[rl];
-        const eO = c.effO[rl];
-        const eD = c.effD[rl];
-        for (let i = 0; i < NC; i++) {
-          eO[i] = outside[i] || fO[i] ? 2 : sO[i] ? 1 : 0;
-          eD[i] = outside[i] || fD[i] ? 2 : sD[i] ? 1 : 0;
-        }
-      }
-    }
-    const eV = this.effV;
-    for (let i = 0; i < NC; i++) {
-      let v = outside[i] || this.drillBlock[i] || this.viaKeep[i] ? 2 : 0;
-      if (!v) {
-        for (let s = 0; s < this.nS; s++) {
-          if (this.viaFix[s][i]) {
-            v = 2;
-            break;
-          }
-          if (this.viaSoft[s][i]) v = 1;
-        }
-      }
-      eV[i] = v;
-    }
+    this.session = ns;
+  }
+
+  /** Finish routing a net: put its own copper (old and new) back into the grids. */
+  private endNet(ns: NetState): void {
     for (const o of ns.own) this.raster(o, false, 1);
     for (const s of ns.segs) this.raster(this.segObst(s, ns.idx), true, 1);
     for (const v of ns.vias) this.raster(this.viaObst(v, ns.idx), true, 1);
+    this.session = null;
   }
 
   /** Connect the islands of a net that are not yet in its tree. Returns nets ripped up (soft mode). */
   private connectNet(ns: NetState, soft: boolean): NetState[] {
     const victimsOut: NetState[] = [];
     if (ns.islands.length < 2) return victimsOut;
-    ns.touched = true;
-    this.computeEff(ns);
     if (!ns.islands.some((i) => i.inTree)) {
       let best = ns.islands[0];
       for (const i of ns.islands) if (i.pads.length > best.pads.length) best = i;
       best.inTree = true;
     }
-    for (;;) {
-      if (this.timeUp()) break;
-      // nearest island to the tree
-      const treeAnchors = this.treeAnchors(ns);
-      let pick: RIsland | null = null;
-      let pickD = Infinity;
-      let pickPt: Vec2 = treeAnchors[0];
-      for (const isl of ns.islands) {
-        if (isl.inTree || isl.failed) continue;
-        for (const a of isl.anchors) {
-          for (const t of treeAnchors) {
-            const d = (a[0] - t[0]) ** 2 + (a[1] - t[1]) ** 2;
-            if (d < pickD) {
-              pickD = d;
-              pick = isl;
-              pickPt = t;
+    this.beginNet(ns);
+    try {
+      for (;;) {
+        if (this.timeUp()) break;
+        const treeAnchors = this.treeAnchors(ns);
+        let pick: RIsland | null = null;
+        let pickD = Infinity;
+        let pickPt: Vec2 = treeAnchors[0];
+        for (const isl of ns.islands) {
+          if (isl.inTree || isl.failed) continue;
+          for (const a of isl.anchors) {
+            for (const t of treeAnchors) {
+              const d = (a[0] - t[0]) ** 2 + (a[1] - t[1]) ** 2;
+              if (d < pickD) {
+                pickD = d;
+                pick = isl;
+                pickPt = t;
+              }
             }
           }
         }
+        if (!pick) break;
+        const res = this.connectIsland(ns, pick, pickPt, soft);
+        if (res.ok) {
+          pick.inTree = true;
+          for (const v of res.victims) if (!victimsOut.includes(v)) victimsOut.push(v);
+        } else pick.failed = res.reason;
       }
-      if (!pick) break;
-      const res = this.connectIsland(ns, pick, pickPt, soft);
-      if (res.ok) {
-        pick.inTree = true;
-        for (const v of res.victims) if (!victimsOut.includes(v)) victimsOut.push(v);
-        if (res.victims.length) this.computeEff(ns);
-      } else pick.failed = res.reason;
+    } finally {
+      this.endNet(ns);
     }
     return victimsOut;
   }
@@ -715,25 +710,22 @@ class Router {
   }
 
   private connectIsland(ns: NetState, isl: RIsland, partner: Vec2, soft: boolean): { ok: boolean; reason: string; victims: NetState[] } {
-    const tries: { k: number; full: boolean }[] = [];
-    if (!soft) tries.push({ k: ns.cls, full: false });
-    tries.push({ k: ns.cls, full: true });
-    if (ns.fb >= 0) tries.push({ k: ns.fb, full: true });
-    let reason = 'no path found';
+    const tries: { k: number; full: boolean }[] = [{ k: ns.classes[0], full: false }, { k: ns.classes[0], full: true }];
+    for (const k of ns.classes.slice(1)) tries.push({ k, full: true });
+    let unreachable = true;
+    let dstEmpty = false;
     for (const t of tries) {
       if (this.timeUp()) return { ok: false, reason: 'time limit reached', victims: [] };
       const cl = this.classes[t.k];
       const src = this.islandTerms(ns, isl, cl, soft);
-      if (!src.length) {
-        reason = `pad ${isl.pads[0].comp.ref}.${isl.pads[0].pad.number} is not reachable on the routing layers (blocked by neighbouring copper)`;
-        continue;
-      }
+      if (!src.length) continue;
+      unreachable = false;
       const dst: Term[] = [];
       for (const i of ns.islands) if (i.inTree) dst.push(...this.islandTerms(ns, i, cl, soft));
       for (const s of ns.segs) dst.push(...this.copperTerms(s.prim, 1 << s.layer, cl, soft));
       for (const v of ns.vias) dst.push(...this.copperTerms(v.prim, this.allMask, cl, soft));
       if (!dst.length) {
-        reason = 'connected copper is not reachable (blocked)';
+        dstEmpty = true;
         continue;
       }
       let bounds: [number, number, number, number] = [1, this.W - 2, 1, this.H - 2];
@@ -766,10 +758,9 @@ class Router {
         for (const v of geo.vias) if (ok) ok = this.clear(makePrim([v], this.viaR), this.allMask, ns.idx, victims);
         victims.delete(ns.idx);
         if (!ok) continue;
-        // congestion history on the contested nodes
         for (const node of path.nodes) {
           const rl = (node / this.NC) | 0;
-          if (cl.effO[rl][node - rl * this.NC] === 1) this.hist[node] += 1;
+          if (this.stO(cl, rl, node - rl * this.NC) === 1) this.hist[node] += 1;
         }
       }
       const victimStates = this.nets.filter((n) => victims.has(n.idx));
@@ -777,11 +768,20 @@ class Router {
       this.commit(ns, geo, cl.hw);
       return { ok: true, reason: '', victims: victimStates };
     }
+    const p = isl.pads[0];
+    let reason: string;
+    if (unreachable) {
+      const onLayer = isl.pads.some((q) => this.rLayers.some((s) => q.layers & (1 << s)));
+      reason = onLayer
+        ? `pad ${p.comp.ref}.${p.pad.number} is not reachable (blocked by neighbouring copper)`
+        : `pad ${p.comp.ref}.${p.pad.number} is not on a routing layer`;
+    } else if (dstEmpty) reason = 'the rest of the net is not reachable (blocked by neighbouring copper)';
+    else reason = soft ? `no path from ${p.comp.ref}.${p.pad.number}, even when ripping up other routes` : `no path from ${p.comp.ref}.${p.pad.number}`;
     return { ok: false, reason, victims: [] };
   }
 
-  private allowed(e: number, soft: boolean): boolean {
-    return e === 0 || (soft && e === 1);
+  private allowed(st: number, soft: boolean): boolean {
+    return st === 0 || (soft && st === 1);
   }
 
   /** Terminal nodes for an island's copper (pads entered anywhere inside their copper). */
@@ -799,43 +799,43 @@ class Router {
       if (!(p.layers & (1 << s))) continue;
       const rl = this.layerToRl[s];
       if (rl < 0) continue;
-      const eO = cl.effO[rl];
       this.forCells(prim, cl.hw * 0.5, (c) => {
-        if (this.allowed(eO[c], soft)) out.push({ node: rl * this.NC + c, stub: null, pad: p });
+        if (this.allowed(this.stO(cl, rl, c), soft)) out.push({ node: rl * this.NC + c, stub: null, pad: p });
       });
     }
     if (out.length) return out;
-    // fall back to nearby free cells with an exactly-checked stub into the pad
+    // off-grid pad: nearby free cells with an exactly checked stub into the pad copper
     const cands: { node: number; d: number; s: number; c: number }[] = [];
     for (let s = 0; s < this.nS; s++) {
       if (!(p.layers & (1 << s))) continue;
       const rl = this.layerToRl[s];
       if (rl < 0) continue;
-      const eO = cl.effO[rl];
       this.forCells(prim, this.g * 1.6, (c, d) => {
-        if (this.allowed(eO[c], soft)) cands.push({ node: rl * this.NC + c, d, s, c });
+        if (this.allowed(this.stO(cl, rl, c), soft)) cands.push({ node: rl * this.NC + c, d, s, c });
       });
     }
     cands.sort((a, b) => a.d - b.d);
-    const centre: Vec2 = [p.pp.x, p.pp.y];
-    for (const k of cands.slice(0, 16)) {
+    for (const k of cands.slice(0, 24)) {
       const a: Vec2 = [this.cellX(k.c), this.cellY(k.c)];
-      if (this.clear(makePrim([a, centre], cl.hw), 1 << k.s, ns.idx)) out.push({ node: k.node, stub: centre, pad: p });
+      for (const target of padStubTargets(p, a)) {
+        if (this.clear(makePrim([a, target], cl.hw), 1 << k.s, ns.idx)) {
+          out.push({ node: k.node, stub: target, pad: p });
+          break;
+        }
+      }
     }
     return out;
   }
 
   private copperTerms(prim: Prim, layers: number, cl: TraceClass, soft: boolean): Term[] {
     const out: Term[] = [];
-    const lim = prim.r + cl.hw - 0.02;
-    if (lim <= 0) return out;
+    if (prim.r + cl.hw - 0.02 <= 0) return out;
     for (let s = 0; s < this.nS; s++) {
       if (!(layers & (1 << s))) continue;
       const rl = this.layerToRl[s];
       if (rl < 0) continue;
-      const eO = cl.effO[rl];
       this.forCells(prim, cl.hw - 0.02, (c) => {
-        if (this.allowed(eO[c], soft)) out.push({ node: rl * this.NC + c, stub: null, pad: null });
+        if (this.allowed(this.stO(cl, rl, c), soft)) out.push({ node: rl * this.NC + c, stub: null, pad: null });
       });
     }
     return out;
@@ -898,6 +898,7 @@ class Router {
     bounds: [number, number, number, number],
     partner: Vec2,
   ): { nodes: number[]; src: Term; dst: Term } | null {
+    this.counters.searches++;
     this.sid++;
     if (this.sid >= 0xfffffff0) {
       this.seen.fill(0);
@@ -911,16 +912,19 @@ class Router {
     const dstMap = new Map<number, Term>();
     for (const t of dst) {
       this.tgt[t.node] = sid;
-      if (!dstMap.has(t.node) || t.stub === null) dstMap.set(t.node, t);
+      const prev = dstMap.get(t.node);
+      if (!prev || (prev.stub && !t.stub)) dstMap.set(t.node, t);
     }
     const srcMap = new Map<number, Term>();
     this.heapN = 0;
     const hx = partner[0];
     const hy = partner[1];
+    const ox = this.ox;
+    const oy = this.oy;
     const H = (c: number) => {
-      const dx = Math.abs(this.ox + (c % W) * g - hx);
-      const dy = Math.abs(this.oy + Math.floor(c / W) * g - hy);
-      return 1.05 * (Math.max(dx, dy) + (Math.SQRT2 - 1) * Math.min(dx, dy));
+      const dx = Math.abs(ox + (c % W) * g - hx);
+      const dy = Math.abs(oy + Math.floor(c / W) * g - hy);
+      return 1.05 * (dx > dy ? dx + 0.41421356 * dy : dy + 0.41421356 * dx);
     };
     for (const t of src) {
       const c = t.node % NC;
@@ -942,15 +946,19 @@ class Router {
     const orthCostH = g;
     const orthCostOff = g * (multi ? 1.3 : 1);
     const diagCost = g * Math.SQRT2 * (multi ? 1.08 : 1);
-    const softPen = 4;
     const histW = g * 1.5;
     const viaCost = this.viaCost;
-    const eV = this.effV;
+    const hist = this.hist;
+    const seen = this.seen;
+    const closed = this.closed;
+    const gS = this.gS;
     let found = -1;
+    let expanded = 0;
     while (this.heapN > 0) {
       const u = this.pop();
-      if (this.closed[u] === sid) continue;
-      this.closed[u] = sid;
+      if (closed[u] === sid) continue;
+      closed[u] = sid;
+      expanded++;
       if (this.tgt[u] === sid) {
         found = u;
         break;
@@ -959,59 +967,64 @@ class Router {
       const c = u - rl * NC;
       const ci = c % W;
       const cj = (c / W) | 0;
-      const gu = this.gS[u];
+      const gu = gS[u];
       const du = this.dirA[u];
-      const eO = cl.effO[rl];
-      const eD = cl.effD[rl];
+      const fO = cl.fixO[rl];
+      const fD = cl.fixD[rl];
+      const sO = cl.softO[rl];
+      const sD = cl.softD[rl];
       const horizPref = (rl & 1) === 0;
+      const base = rl * NC;
       for (let d = 0; d < 8; d++) {
         const ni = ci + DX[d];
         const nj = cj + DY[d];
         if (ni < i0 || ni > i1 || nj < j0 || nj > j1) continue;
         const nc = c + offs[d];
-        const v = rl * NC + nc;
-        if (this.closed[v] === sid) continue;
-        let e: number;
+        const v = base + nc;
+        if (closed[v] === sid) continue;
         let cost: number;
+        let softHit: boolean;
         if (d & 1) {
-          e = eD[nc] > eD[c] ? eD[nc] : eD[c];
+          if (fD[nc] || fD[c]) continue;
+          softHit = sD[nc] !== 0 || sD[c] !== 0;
           cost = diagCost;
         } else {
-          e = eO[nc];
+          if (fO[nc]) continue;
+          softHit = sO[nc] !== 0;
           cost = (d === 0 || d === 4) === horizPref ? orthCostH : orthCostOff;
         }
-        if (e === 2 || (e === 1 && !soft)) continue;
-        if (e === 1) cost += softPen + this.hist[v] * g;
+        if (softHit) {
+          if (!soft) continue;
+          cost += SOFT_PENALTY + hist[v] * g;
+        }
         if (du >= 0 && du !== d) {
-          let k = Math.abs(du - d);
+          let k = du > d ? du - d : d - du;
           if (k > 4) k = 8 - k;
           cost += BEND[k];
         }
-        cost += this.hist[v] * histW;
-        const ng = gu + cost;
-        if (this.seen[v] !== sid || ng < this.gS[v]) {
-          this.seen[v] = sid;
-          this.gS[v] = ng;
+        const ng = gu + cost + hist[v] * histW;
+        if (seen[v] !== sid || ng < gS[v]) {
+          seen[v] = sid;
+          gS[v] = ng;
           this.par[v] = u;
           this.dirA[v] = d;
           this.push(ng + H(nc), v);
         }
       }
       if (multi) {
-        const ev = eV[c];
+        const ev = this.stV(c);
         if (ev === 2 || (ev === 1 && !soft)) continue;
         for (let r2 = 0; r2 < nL; r2++) {
           if (r2 === rl) continue;
           const v = r2 * NC + c;
-          if (this.closed[v] === sid) continue;
-          const e2 = cl.effO[r2][c];
+          if (closed[v] === sid) continue;
+          const e2 = this.stO(cl, r2, c);
           if (e2 === 2 || (e2 === 1 && !soft)) continue;
-          let cost = viaCost + (ev === 1 ? softPen * 2 : 0) + (e2 === 1 ? softPen : 0) + this.hist[v] * histW;
-          if (r2 !== rl + 1 && r2 !== rl - 1) cost += 0.01;
+          const cost = viaCost + (ev === 1 ? SOFT_PENALTY * 2 : 0) + (e2 === 1 ? SOFT_PENALTY : 0) + hist[v] * histW + (r2 !== rl + 1 && r2 !== rl - 1 ? 0.01 : 0);
           const ng = gu + cost;
-          if (this.seen[v] !== sid || ng < this.gS[v]) {
-            this.seen[v] = sid;
-            this.gS[v] = ng;
+          if (seen[v] !== sid || ng < gS[v]) {
+            seen[v] = sid;
+            gS[v] = ng;
             this.par[v] = u;
             this.dirA[v] = -1;
             this.push(ng + H(c), v);
@@ -1019,6 +1032,7 @@ class Router {
         }
       }
     }
+    this.counters.expanded += expanded;
     if (found < 0) return null;
     const nodes: number[] = [];
     for (let v = found; v >= 0; v = this.par[v]) nodes.push(v);
@@ -1046,8 +1060,6 @@ class Router {
         runs.push(cur);
       } else cur.pts.push(p);
     }
-    const first = runs[0];
-    const last = runs[runs.length - 1];
     const extend = (run: { layer: number; pts: Vec2[] }, t: Term, atStart: boolean) => {
       const end = atStart ? run.pts[0] : run.pts[run.pts.length - 1];
       let target: Vec2 | null = t.stub;
@@ -1060,22 +1072,22 @@ class Router {
       if (atStart) run.pts.unshift(q);
       else run.pts.push(q);
     };
-    extend(first, src, true);
-    extend(last, dst, false);
+    extend(runs[0], src, true);
+    extend(runs[runs.length - 1], dst, false);
     for (const r of runs) r.pts = simplify(r.pts);
     return { runs, vias };
   }
 
   private commit(ns: NetState, geo: { runs: { layer: number; pts: Vec2[] }[]; vias: Vec2[] }, hw: number): void {
     const net = ns.idx;
+    const live = this.session !== ns;
     for (const r of geo.runs) {
       const pts = r.pts.length >= 2 ? r.pts : [r.pts[0], r.pts[0]];
       for (let i = 1; i < pts.length; i++) {
         const prim = makePrim([pts[i - 1], pts[i]], hw);
         const o: Obst = { prim, layers: 1 << r.layer, clr: this.rules.clearance, net };
-        this.raster(o, true, 1);
-        const exact = this.addExact(o, true);
-        ns.segs.push({ layer: r.layer, prim, exact });
+        if (live) this.raster(o, true, 1);
+        ns.segs.push({ layer: r.layer, prim, exact: this.addExact(o, true) });
       }
       ns.traces.push({ id: newId('trk'), netId: ns.id, layer: this.stack[r.layer], width: round6(hw * 2), points: pts });
     }
@@ -1083,30 +1095,24 @@ class Router {
       const prim = makePrim([p], this.viaR);
       const hole = makePrim([p], this.viaDrill / 2);
       const o: Obst = { prim, layers: this.allMask, clr: this.rules.clearance, net };
-      this.raster(o, true, 1);
+      if (live) this.raster(o, true, 1);
       const exact = this.addExact(o, true);
-      const drill = this.addDrill(hole, 1);
+      const drill = this.addDrill(hole);
       ns.vias.push({ x: p[0], y: p[1], prim, hole, exact, drill });
       ns.viaObjs.push({ id: newId('via'), netId: ns.id, x: p[0], y: p[1], drill: this.viaDrill, diameter: this.viaR * 2 });
-      // own vias must keep hole spacing from later vias of the same net
-      this.forCells(hole, this.viaDrill / 2 + HOLE_TO_HOLE + EPSR, (cell) => (this.effV[cell] = 2));
     }
   }
 
   private ripNet(ns: NetState): void {
+    const live = this.session !== ns;
     for (const s of ns.segs) {
-      this.raster(this.segObst(s, ns.idx), true, -1);
+      if (live) this.raster(this.segObst(s, ns.idx), true, -1);
       this.removeExact(s.exact);
     }
     for (const v of ns.vias) {
-      this.raster(this.viaObst(v, ns.idx), true, -1);
+      if (live) this.raster(this.viaObst(v, ns.idx), true, -1);
       this.removeExact(v.exact);
-      this.forCells(v.hole, this.viaDrill / 2 + HOLE_TO_HOLE + EPSR, (cell) => (this.drillBlock[cell] -= 1));
-      const d = this.drillItems[v.drill];
-      if (d && d.alive) {
-        d.alive = false;
-        this.drillIdx.remove(v.drill, d.prim.bb);
-      }
+      this.removeDrill(v.drill);
     }
     ns.segs = [];
     ns.vias = [];
@@ -1122,14 +1128,25 @@ class Router {
     for (const s of ns.segs) if (!this.clear(s.prim, 1 << s.layer, ns.idx)) return false;
     for (const v of ns.vias) {
       if (!this.clear(v.prim, this.allMask, ns.idx)) return false;
-      const d = this.drillItems[v.drill];
-      d.alive = false;
-      const holeOk = this.viaHoleClear(v.x, v.y);
-      d.alive = true;
-      if (!holeOk) return false;
+      if (!this.viaHoleClear(v.x, v.y, v.drill)) return false;
     }
     return true;
   }
+}
+
+/** Candidate stub end points inside a pad: projection on its long axis, then its centre. */
+function padStubTargets(p: PadInfo, from: Vec2): Vec2[] {
+  const centre: Vec2 = [p.pp.x, p.pp.y];
+  const pad = p.pad;
+  const w = pad.w;
+  const h = pad.shape === 'circle' ? pad.w : pad.h;
+  const half = (Math.max(w, h) - Math.min(w, h)) / 2;
+  if (half < 1e-6 || pad.shape === 'polygon') return [centre];
+  const rad = ((p.pp.rotation || 0) * Math.PI) / 180;
+  const u: Vec2 = w > h ? [Math.cos(rad), Math.sin(rad)] : [-Math.sin(rad), Math.cos(rad)];
+  const t = Math.max(-half, Math.min(half, (from[0] - centre[0]) * u[0] + (from[1] - centre[1]) * u[1]));
+  const proj: Vec2 = [centre[0] + u[0] * t, centre[1] + u[1] * t];
+  return distPtSeg2(proj[0], proj[1], centre[0], centre[1], centre[0], centre[1]) < 1e-12 ? [centre] : [proj, centre];
 }
 
 function round6(v: number): number {

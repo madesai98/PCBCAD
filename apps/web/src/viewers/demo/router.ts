@@ -157,6 +157,33 @@ export class DemoRouter {
     );
   }
 
+  /** Make the exact rectangle (no inflation) passable for its own net, overriding clearance blocks (pads, fan-out stubs). */
+  forceRect(layers: ('top' | 'bottom')[], minX: number, minY: number, maxX: number, maxY: number, netId: string) {
+    const own = this.netIndex(netId);
+    const i0 = Math.max(0, Math.floor((minX - this.x0) / this.res));
+    const i1 = Math.min(this.nx - 1, Math.floor((maxX - this.x0) / this.res));
+    const j0 = Math.max(0, Math.floor((minY - this.y0) / this.res));
+    const j1 = Math.min(this.ny - 1, Math.floor((maxY - this.y0) / this.res));
+    for (const l of layers) {
+      const base = (l === 'top' ? 0 : 1) * this.nx * this.ny;
+      for (let g = 0; g < 2; g++)
+        for (let j = j0; j <= j1; j++)
+          for (let i = i0; i <= i1; i++) {
+            const k = base + j * this.nx + i;
+            const v = this.grids[g][k];
+            if (v === -1 || v === -2 || v === own) this.grids[g][k] = own;
+          }
+    }
+  }
+
+  isFree(layer: 'top' | 'bottom', x: number, y: number, netId: string, wide = false): boolean {
+    const i = Math.floor((x - this.x0) / this.res);
+    const j = Math.floor((y - this.y0) / this.res);
+    if (i < 0 || j < 0 || i >= this.nx || j >= this.ny) return false;
+    const v = this.grids[wide ? 1 : 0][(layer === 'top' ? 0 : 1) * this.nx * this.ny + j * this.nx + i];
+    return v === -1 || v === this.netIndex(netId);
+  }
+
   markCircle(layers: ('top' | 'bottom')[], cx: number, cy: number, r: number, netId: string | null) {
     const L = layers.map((l) => (l === 'top' ? 0 : 1) as Layer);
     this.mark(L, [cx - r, cy - r, cx + r, cy + r], (x, y) => Math.hypot(x - cx, y - cy) - r, netId);

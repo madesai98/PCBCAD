@@ -594,7 +594,7 @@ export function drawPcb(ctx: CanvasRenderingContext2D, scene: PcbScene, vp: PcbV
     for (const l of order) {
       if (!layerOn(l)) continue;
       const col = lp.copper[l];
-      if (L.zones) drawZones(ctx, scene, vp, st, l, col, 0.32);
+      if (L.zones) drawZones(ctx, scene, vp, st, l, col, l === facing ? 0.2 : 0.12);
       strokeGroups(ctx, scene.copper[l]?.traceGroups ?? [], col, 0, 0, scale);
       if (l === 'top' || l === 'bottom') {
         ctx.fillStyle = lp.pad[l];
@@ -631,12 +631,14 @@ export function drawPcb(ctx: CanvasRenderingContext2D, scene: PcbScene, vp: PcbV
       ctx.strokeStyle = facing === 'top' ? lp.courtTop : lp.courtBottom;
       ctx.stroke(scene.courtyard[facing]);
     }
-    // Fab-style reference labels centred on bodies.
-    ctx.fillStyle = theme.dark ? 'rgba(230,233,239,0.72)' : 'rgba(15,23,42,0.7)';
-    for (const c of scene.comps) {
-      if (c.staged) continue;
-      if (c.placedAs.side !== facing && !(c.placedAs.side === far && (far === 'top' ? L.top : L.bottom))) continue;
-      drawText(ctx, vp, { ...c.fabRef, text: c.comp.ref }, fontMono, 7 * vp.dpr, 600);
+    // Fab-style reference labels centred on bodies (when silkscreen is hidden).
+    if (!L.silk) {
+      ctx.fillStyle = theme.dark ? 'rgba(230,233,239,0.62)' : 'rgba(15,23,42,0.62)';
+      for (const c of scene.comps) {
+        if (c.staged || !c.pads.length) continue;
+        if (c.placedAs.side !== facing && !(c.placedAs.side === far && (far === 'top' ? L.top : L.bottom))) continue;
+        drawText(ctx, vp, { ...c.fabRef, text: c.comp.ref }, fontMono, 6 * vp.dpr, 600);
+      }
     }
     setBoard(ctx, vp);
   }

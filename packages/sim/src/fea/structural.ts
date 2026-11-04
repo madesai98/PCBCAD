@@ -54,6 +54,8 @@ export interface StructuralAnalysis {
   bodies: { analysed: number; skipped: number };
   materials: EffectiveMaterial[];
   wallMs: number;
+  /** Time split (ms): multigrid setup, PCG solve, stress recovery (summed over bodies). */
+  timing: { setupMs: number; solveMs: number; recoveryMs: number };
   /** Displacement (mm) of a grid node (i,j,k ∈ [0..n]) from the first analysed body containing it. */
   nodeDisplacement(i: number, j: number, k: number): Vec3 | undefined;
 }
@@ -446,6 +448,8 @@ export function analyzeStructure(setup: StructuralSetup): StructuralAnalysis {
   let maxNodeDisp = 0;
   const progress = setup.onProgress;
   const logTol = Math.log(tol);
+  const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  const timing = { setupMs: 0, solveMs: 0, recoveryMs: 0 };
 
   for (let b = 0; b < nB; b++) {
     if (!analysedBody[b]) continue;
@@ -533,6 +537,7 @@ export function analyzeStructure(setup: StructuralSetup): StructuralAnalysis {
         f[3 * n + 1] = 0;
         f[3 * n + 2] = 0;
       }
+    let tA = now();
     const mg = new ElasticMultigrid({
       nNodes: nN,
       nodeCoord: Int32Array.from(nodeCoordArr),
@@ -546,11 +551,15 @@ export function analyzeStructure(setup: StructuralSetup): StructuralAnalysis {
     });
     const u = new Float64Array(3 * nN);
     const bodyDofs = mg.dofs;
+    timing.setupMs += now() - tA;
+    tA = now();
     const res = solvePcg(mg, f, u, tol, maxIt, (_it, rel) => {
       if (!progress) return;
       const frac = Math.min(1, Math.max(0, Math.log(Math.max(rel, 1e-300)) / logTol));
       progress(Math.min(0.99, (0.05 + 0.9 * (doneDofs + frac * nE)) / Math.max(1, totalDofsEst)));
     });
+    timing.solveMs += now() - tA;
+    tA = now();
     doneDofs += nE;
     maxIters = Math.max(maxIters, res.iterations);
     maxRes = Math.max(maxRes, res.residual);
@@ -640,6 +649,7 @@ export function analyzeStructure(setup: StructuralSetup): StructuralAnalysis {
       vm[q] = best;
       vmPoint[q] = bestP;
     }
+    timing.recoveryMs += now() - tA;
   }
   if (skippedVoxels > 0 && nSolid > 0)
     warnings.push(`${skippedVoxels} of ${nSolid} solid voxels were not analysed (unfixed bodies).`);
@@ -666,6 +676,7 @@ export function analyzeStructure(setup: StructuralSetup): StructuralAnalysis {
     bodies: { analysed: nB - skippedBodies, skipped: skippedBodies },
     materials: mats,
     wallMs: t1 - t0,
+    timing,
     nodeDisplacement(i: number, j: number, k: number): Vec3 | undefined {
       for (const s of sols) {
         if (!s) continue;

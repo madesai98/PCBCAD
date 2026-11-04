@@ -1,13 +1,18 @@
-import type { BBox2, Grid2, Vec2 } from '@pcbcad/core';
+import type { BBox2, Grid2, PlacedPad, Vec2 } from '@pcbcad/core';
 
 /**
  * Coverage rasterisation on a uniform cell grid.
  *
- * Shapes are converted to horizontal spans on `sub` sample rows per cell row (sample row r at
- * y = y0 + (r + ½)·dy/sub). Within a sample row the covered x-intervals of all shapes are merged
- * (union, so overlapping pads/traces/pours are never double counted) and integrated EXACTLY in x
- * over each cell. The coverage fraction of a cell is the mean over its sample rows, so x-errors
- * are zero and y-errors are bounded by one sample-row height (dy/sub) per shape edge.
+ * Shapes are converted to horizontal spans on `sub` sample rows (bands) per cell row (band r
+ * spans y ∈ [y0 + r·h, y0 + (r+1)·h], h = dy/sub). Within a band the covered x-intervals of all
+ * shapes are merged (union, so overlapping pads/traces/pours are never double counted) and
+ * integrated EXACTLY in x over each cell; a cell's coverage is the mean over its bands.
+ *  - General polygons, discs and oblique capsules are point-sampled at the band centre line:
+ *    x is exact, y-errors are bounded by one band height per shape edge (unbiased).
+ *  - Axis-aligned rectangles (rect / roundrect / oval pads at 0/90/180/270°, horizontal and
+ *    vertical trace bodies) are integrated exactly over the band height ("weighted spans"),
+ *    so the most common PCB shapes are rasterised exactly in both directions. Where weighted
+ *    spans overlap each other the union is approximated by their maximum.
  */
 
 /** Uniform grid covering a bbox with cells of approximately `res` mm (exactly tiling the bbox). */
@@ -71,7 +76,10 @@ export function ringCrossings(rings: readonly (readonly Vec2[])[], y0: number, h
 
 /** Union-coverage rasteriser (see module doc). */
 export class CoverageRaster {
+  /** Full-band spans per band: flat [xa, xb, ...]. */
   private readonly rows: number[][];
+  /** Partial-band spans per band: flat [xa, xb, w, ...] with w ∈ (0,1) the covered band fraction. */
+  private readonly wrows: (number[] | undefined)[];
   private readonly h: number;
 
   /**
@@ -86,12 +94,35 @@ export class CoverageRaster {
     this.h = grid.dy / this.sub;
     this.rows = new Array(grid.ny * this.sub);
     for (let r = 0; r < this.rows.length; r++) this.rows[r] = [];
+    this.wrows = new Array(this.rows.length);
   }
 
   /** True when nothing has been added. */
   get empty(): boolean {
     for (const r of this.rows) if (r.length) return false;
+    for (const r of this.wrows) if (r?.length) return false;
     return true;
+  }
+
+  /** Axis-aligned rectangle [xa, xb] × [ya, yb], integrated exactly over each band's height. */
+  addRect(xa: number, ya: number, xb: number, yb: number): void {
+    if (xb < xa) [xa, xb] = [xb, xa];
+    if (yb < ya) [ya, yb] = [yb, ya];
+    if (!(xb > xa && yb > ya)) return;
+    const { y0 } = this.grid;
+    const h = this.h;
+    const lo = Math.max(0, Math.floor((ya - y0) / h));
+    const hi = Math.min(this.rows.length - 1, Math.ceil((yb - y0) / h) - 1);
+    for (let r = lo; r <= hi; r++) {
+      const b0 = y0 + r * h;
+      const f = (Math.min(yb, b0 + h) - Math.max(ya, b0)) / h;
+      if (f >= 1 - 1e-9) this.rows[r].push(xa, xb);
+      else if (f > 1e-12) {
+        let w = this.wrows[r];
+        if (!w) this.wrows[r] = w = [];
+        w.push(xa, xb, f);
+      }
+    }
   }
 
   /** Sample-row index range [lo, hi] whose sample line lies within the closed interval [ymin, ymax]. */
@@ -134,6 +165,14 @@ export class CoverageRaster {
     const L = Math.hypot(bx - ax, by - ay);
     if (L < 1e-9) {
       this.addDisc(ax, ay, r);
+      return;
+    }
+    if (Math.abs(ay - by) < 1e-12 || Math.abs(ax - bx) < 1e-12) {
+      // orthogonal segment: exact rectangle body + round end caps
+      if (Math.abs(ay - by) < 1e-12) this.addRect(Math.min(ax, bx), ay - r, Math.max(ax, bx), ay + r);
+      else this.addRect(ax - r, Math.min(ay, by), ax + r, Math.max(ay, by));
+      this.addDisc(ax, ay, r);
+      this.addDisc(bx, by, r);
       return;
     }
     const ux = (bx - ax) / L;
@@ -201,9 +240,23 @@ export class CoverageRaster {
     if (out) res.fill(0);
     const w = 1 / this.sub;
     const idx: number[] = [];
+    const acc = (rowBase: number, xa: number, xb: number, weight: number) => {
+      let ua = (xa - x0) / dx;
+      let ub = (xb - x0) / dx;
+      if (ua < 0) ua = 0;
+      if (ub > nx) ub = nx;
+      if (!(ub > ua)) return;
+      const ia = Math.floor(ua);
+      const ib = Math.min(nx - 1, Math.ceil(ub) - 1);
+      for (let i = ia; i <= ib; i++) {
+        const ov = Math.min(ub, i + 1) - Math.max(ua, i);
+        if (ov > 0) res[rowBase + i] += ov * weight;
+      }
+    };
     for (let r = 0; r < this.rows.length; r++) {
       const s = this.rows[r];
-      if (!s.length) continue;
+      const ws = this.wrows[r];
+      if (!s.length && !ws?.length) continue;
       const rowBase = Math.floor(r / this.sub) * nx;
       let spans = s;
       if (s.length > 2) {
@@ -229,23 +282,112 @@ export class CoverageRaster {
         merged.push(ca, cb);
         spans = merged;
       }
-      for (let p = 0; p < spans.length; p += 2) {
-        let ua = (spans[p] - x0) / dx;
-        let ub = (spans[p + 1] - x0) / dx;
-        if (ua < 0) ua = 0;
-        if (ub > nx) ub = nx;
-        if (!(ub > ua)) continue;
-        const ia = Math.floor(ua);
-        const ib = Math.min(nx - 1, Math.ceil(ub) - 1);
-        for (let i = ia; i <= ib; i++) {
-          const ov = Math.min(ub, i + 1) - Math.max(ua, i);
-          if (ov > 0) res[rowBase + i] += ov * w;
-        }
-      }
+      for (let p = 0; p < spans.length; p += 2) acc(rowBase, spans[p], spans[p + 1], w);
+      if (ws?.length) for (const [xa, xb, f] of partialEnvelope(ws, spans)) acc(rowBase, xa, xb, f * w);
     }
     for (let i = 0; i < res.length; i++) if (res[i] > 1) res[i] = 1;
     return res;
   }
+}
+
+/** If `ring` is an axis-aligned rectangle, its [minX, minY, maxX, maxY]; else undefined. */
+export function axisAlignedRect(ring: readonly Vec2[]): [number, number, number, number] | undefined {
+  let pts = ring;
+  if (pts.length === 5 && pts[0][0] === pts[4][0] && pts[0][1] === pts[4][1]) pts = pts.slice(0, 4);
+  if (pts.length !== 4) return undefined;
+  const tol = 1e-9;
+  for (let i = 0; i < 4; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % 4];
+    if (Math.abs(a[0] - b[0]) > tol && Math.abs(a[1] - b[1]) > tol) return undefined;
+  }
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const [x, y] of pts) {
+    x0 = Math.min(x0, x);
+    y0 = Math.min(y0, y);
+    x1 = Math.max(x1, x);
+    y1 = Math.max(y1, y);
+  }
+  return x1 > x0 && y1 > y0 ? [x0, y0, x1, y1] : undefined;
+}
+
+/** Add a single-ring polygon, using the exact rectangle primitive when it is axis aligned. */
+export function addRing(r: CoverageRaster, ring: readonly Vec2[]): void {
+  const rect = axisAlignedRect(ring);
+  if (rect) r.addRect(rect[0], rect[1], rect[2], rect[3]);
+  else r.addPolygon([ring]);
+}
+
+/**
+ * Add a placed pad's copper. rect / roundrect / oval pads at multiples of 90° and circles are
+ * built from exact rectangles + discs; anything else uses the pad polygon.
+ */
+export function addPadShape(r: CoverageRaster, pp: PlacedPad): void {
+  const shape = pp.pad.shape;
+  if (shape === 'circle') {
+    r.addDisc(pp.x, pp.y, pp.w / 2);
+    return;
+  }
+  const rot = (((pp.rotation || 0) % 360) + 360) % 360;
+  const k = Math.round(rot / 90);
+  if ((shape === 'rect' || shape === 'roundrect' || shape === 'oval') && Math.abs(rot - k * 90) < 1e-6) {
+    const swap = k % 2 === 1;
+    const w = swap ? pp.h : pp.w;
+    const h = swap ? pp.w : pp.h;
+    const x0 = pp.x - w / 2;
+    const x1 = pp.x + w / 2;
+    const y0 = pp.y - h / 2;
+    const y1 = pp.y + h / 2;
+    let rad = shape === 'rect' ? 0 : shape === 'oval' ? Math.min(w, h) / 2 : (pp.pad.roundness ?? 0.25) * Math.min(w, h);
+    rad = Math.min(rad, w / 2, h / 2);
+    if (rad <= 1e-9) {
+      r.addRect(x0, y0, x1, y1);
+      return;
+    }
+    r.addRect(x0, y0 + rad, x1, y1 - rad);
+    r.addRect(x0 + rad, y0, x1 - rad, y1);
+    r.addDisc(x0 + rad, y0 + rad, rad);
+    r.addDisc(x1 - rad, y0 + rad, rad);
+    r.addDisc(x0 + rad, y1 - rad, rad);
+    r.addDisc(x1 - rad, y1 - rad, rad);
+    return;
+  }
+  r.addPolygon([pp.polygon]);
+}
+
+/**
+ * Upper envelope (max weight) of partial-band spans `ws` (flat [xa, xb, w, ...]) minus the
+ * full-band spans `full` (sorted, disjoint, flat [xa, xb, ...]) of the same band.
+ */
+function partialEnvelope(ws: number[], full: number[]): [number, number, number][] {
+  const xs: number[] = [];
+  for (let p = 0; p < ws.length; p += 3) xs.push(ws[p], ws[p + 1]);
+  xs.sort((a, b) => a - b);
+  const out: [number, number, number][] = [];
+  for (let k = 0; k + 1 < xs.length; k++) {
+    const a = xs[k];
+    const b = xs[k + 1];
+    if (!(b > a)) continue;
+    const mid = 0.5 * (a + b);
+    let wmax = 0;
+    for (let p = 0; p < ws.length; p += 3) if (ws[p] <= mid && ws[p + 1] >= mid && ws[p + 2] > wmax) wmax = ws[p + 2];
+    if (wmax <= 0) continue;
+    // subtract full-band spans from [a, b]
+    let cur = a;
+    for (let q = 0; q < full.length && cur < b; q += 2) {
+      const fa = full[q];
+      const fb = full[q + 1];
+      if (fb <= cur) continue;
+      if (fa >= b) break;
+      if (fa > cur) out.push([cur, fa, wmax]);
+      cur = Math.max(cur, fb);
+    }
+    if (cur < b) out.push([cur, b, wmax]);
+  }
+  return out;
 }
 
 /**

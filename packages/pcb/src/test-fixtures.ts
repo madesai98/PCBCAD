@@ -177,3 +177,36 @@ export function routingTestBoard(): { board: Board; parts: Record<string, PartDe
   }
   return { board: b, parts };
 }
+
+/** Deterministic large board: `ics` MCUs with 2 decaps each, 4 headers, and resistors up to `total` parts. */
+export function bigBoard(total = 150, w = 100, h = 80, ics = 6): { board: Board; parts: Record<string, PartDef> } {
+  const parts = stdParts();
+  const b = emptyBoard(w, h);
+  let seed = 12345;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  const add = (id: string, ref: string, partId: string) => {
+    const c = comp(id, ref, partId, 0, 0);
+    c.placed = false;
+    b.components.push(c);
+    return c;
+  };
+  for (let k = 1; k <= 4; k++) add(`j${k}`, `J${k}`, 'hdr6');
+  for (let k = 1; k <= ics; k++) add(`u${k}`, `U${k}`, 'mcu');
+  let cIdx = 1;
+  for (let k = 1; k <= ics; k++) for (let m = 0; m < 2; m++) add(`c${cIdx}`, `C${cIdx++}`, 'cap');
+  let rIdx = 1;
+  while (b.components.length < total) add(`r${rIdx}`, `R${rIdx++}`, 'res');
+  const pins: string[] = [];
+  for (let k = 1; k <= 4; k++) for (let p = 3; p <= 6; p++) pins.push(`J${k}.${p}`);
+  for (let k = 1; k <= ics; k++) for (let p = 3; p <= 18; p++) pins.push(`U${k}.${p}`);
+  wire(b, 'VCC', [...Array.from({ length: 4 }, (_, k) => `J${k + 1}.1`), ...Array.from({ length: ics }, (_, k) => `U${k + 1}.1`), ...Array.from({ length: cIdx - 1 }, (_, k) => `C${k + 1}.1`)]);
+  wire(b, 'GND', [...Array.from({ length: 4 }, (_, k) => `J${k + 1}.2`), ...Array.from({ length: ics }, (_, k) => `U${k + 1}.2`), ...Array.from({ length: cIdx - 1 }, (_, k) => `C${k + 1}.2`)]);
+  let n = 0;
+  for (let r = 1; r < rIdx && pins.length >= 2; r++) {
+    const a = pins.splice(Math.floor(rnd() * pins.length), 1)[0];
+    wire(b, `N${n++}`, [a, `R${r}.1`]);
+    if (rnd() < 0.5 && pins.length) wire(b, `N${n++}`, [`R${r}.2`, pins.splice(Math.floor(rnd() * pins.length), 1)[0]]);
+    else if (r > 1) wire(b, `N${n++}`, [`R${r}.2`, `R${r - 1}.2`].filter((x, i, arr) => arr.indexOf(x) === i));
+  }
+  return { board: b, parts };
+}

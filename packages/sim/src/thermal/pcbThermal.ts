@@ -1,10 +1,10 @@
-import type { Board, CopperLayer, Grid2, PartDef, PcbThermalResult, Project, Vec2 } from '@pcbcad/core';
+import type { CopperLayer, Grid2, PartDef, PcbThermalResult, Project, Vec2 } from '@pcbcad/core';
 import { componentCourtyard, pack, placedPads, polygonArea, polygonBBox, rotate2 } from '@pcbcad/core';
 import { forcedConvectionH, mixedConvectionH, naturalConvectionH, radiationFlux, radiationH } from './convection';
 import { GridMultigrid, type GridSystem } from './gridSolver';
 import { buildBoardNetwork, type BoardNetwork } from './network';
 import { caseToBoardTheta, defaultThetaJC } from './packageThermal';
-import { CoverageRaster, centreMask, makeGrid, windowGrid } from './raster';
+import { CoverageRaster, addPadShape, addRing, centreMask, makeGrid, windowGrid } from './raster';
 import { barrelAreaMm2, copperConductivity, dielectricConductivity, layerCopperMm, layerZ, stackLayers, viaSpan } from './stackup';
 import { analyzeNetworks, netsWithCurrent, type CopperLoss, type TraceCurrentResult } from './traceCurrents';
 
@@ -107,6 +107,8 @@ interface ComponentRec {
 const MAX_CELLS = 1.5e6;
 const MAX_RESOLVED_UNKNOWNS = 400_000;
 const MAX_OUTER = 8;
+/** Relative residual of the final linear solve. */
+const FINAL_TOL = 1e-8;
 
 function finiteOr(v: number | undefined, d: number): number {
   return v !== undefined && Number.isFinite(v) ? v : d;
@@ -215,8 +217,11 @@ export function simulatePcbThermal(project: Project, boardId: string, opts: PcbT
     for (const pp of placedPads(comp, fp)) {
       if (pp.pad.kind === 'npth') continue;
       for (const l of pp.layers) {
-        if (l === 'inner') inner.forEach((il) => rasters.get(il)!.addPolygon([pp.polygon]));
-        else rasters.get(l)?.addPolygon([pp.polygon]);
+        if (l === 'inner') inner.forEach((il) => addPadShape(rasters.get(il)!, pp));
+        else {
+          const r = rasters.get(l);
+          if (r) addPadShape(r, pp);
+        }
       }
       if (pp.pad.kind === 'tht') {
         const d = pp.pad.slot ? (pp.pad.slot.w + pp.pad.slot.h) / 2 : (pp.pad.drill ?? Math.min(pp.w, pp.h) * 0.6);
@@ -245,7 +250,8 @@ export function simulatePcbThermal(project: Project, boardId: string, opts: PcbT
     const r = rasters.get(zn.layer);
     if (!r) continue;
     const rings = zn.fill && zn.fill.length ? zn.fill : [zn.outline && zn.outline.length >= 3 ? zn.outline : board.outline];
-    r.addPolygon(rings);
+    if (rings.length === 1) addRing(r, rings[0]);
+    else r.addPolygon(rings);
   }
   const cov = new Map<CopperLayer, Float64Array>();
   for (const l of layers) cov.set(l, rasters.get(l)!.finish());
@@ -253,7 +259,10 @@ export function simulatePcbThermal(project: Project, boardId: string, opts: PcbT
 
   /* ------------------------------------------- couplings ------------------------------------------- */
   const K = new Float64Array(n * M);
-  const tCu = layers.map((l) => layerCopperMm(stack, l) * 1e-3);
+  const tCu = layers.map((l) => {
+    const t = layerCopperMm(stack, l) * 1e-3;
+    return Number.isFinite(t) && t > 0 ? t : 0;
+  });
   for (let k = 0; k < NC; k++) {
     const c = cellOf[k];
     if (c < 0) continue;
@@ -366,6 +375,7 @@ export function simulatePcbThermal(project: Project, boardId: string, opts: PcbT
   for (const b of project.boards) for (const c of b.components) knownKeys.add(c.id).add(c.ref);
   const unknown = Object.keys(opts.power ?? {}).filter((k) => !knownKeys.has(k));
   if (unknown.length) warnings.push(`power given for unknown component(s): ${unknown.slice(0, 8).join(', ')}${unknown.length > 8 ? ', …' : ''}`);
+  const negative: string[] = [];
   for (const comp of board.components) {
     let P = finiteOr(opts.power?.[comp.id] ?? opts.power?.[comp.ref], 0);
     if (!comp.placed || comp.dnp) {
@@ -373,7 +383,7 @@ export function simulatePcbThermal(project: Project, boardId: string, opts: PcbT
       continue;
     }
     if (P < 0) {
-      if (P < -1e-6) warnings.push(`${comp.ref}: negative power ${P.toFixed(3)} W (a source?) treated as 0`);
+      if (P < -1e-3) negative.push(comp.ref);
       P = 0;
     }
     const part = parts[comp.partId];
@@ -381,11 +391,13 @@ export function simulatePcbThermal(project: Project, boardId: string, opts: PcbT
     const fp = part?.footprint;
     const node = comp.side === 'bottom' ? M - 1 : 0;
     const shapes: Vec2[][] = [];
+    const padShapes: ReturnType<typeof placedPads> = [];
     let padArea = 0;
     if (fp) {
       for (const pp of placedPads(comp, fp)) {
         if (pp.pad.kind === 'npth' || !(pp.layers.includes(comp.side) || pp.pad.kind === 'tht')) continue;
         shapes.push(pp.polygon);
+        padShapes.push(pp);
         padArea += Math.abs(polygonArea(pp.polygon));
       }
       if (!shapes.length) shapes.push(componentCourtyard(comp, fp));
@@ -420,7 +432,8 @@ export function simulatePcbThermal(project: Project, boardId: string, opts: PcbT
     if (i1 >= i0 && j1 >= j0) {
       const wg = windowGrid(grid, i0, j0, i1 - i0 + 1, j1 - j0 + 1);
       const r = new CoverageRaster(wg, Math.max(sub, 6));
-      for (const s of shapes) r.addPolygon([s]);
+      if (padShapes.length) for (const pp of padShapes) addPadShape(r, pp);
+      else for (const s of shapes) addRing(r, s);
       const f = r.finish();
       for (let jj = 0; jj < wg.ny; jj++)
         for (let ii = 0; ii < wg.nx; ii++) {
@@ -446,6 +459,8 @@ export function simulatePcbThermal(project: Project, boardId: string, opts: PcbT
     comps.push(rec);
     if (P > 0) for (let q = 0; q < rec.cells.length; q++) src[rec.cells[q] * M + node] += P * rec.w[q];
   }
+
+  if (negative.length) warnings.push(`negative power (delivered by sources) treated as 0 for: ${negative.slice(0, 8).join(', ')}${negative.length > 8 ? ', …' : ''}`);
 
   /* --------------------------------------- trace currents --------------------------------------- */
   let network: BoardNetwork | undefined;
@@ -524,6 +539,7 @@ export function simulatePcbThermal(project: Project, boardId: string, opts: PcbT
   let outer = 0;
   let residual = 0;
   let converged = true;
+  let lastChange = 1;
   let traceResult: TraceCurrentResult | undefined;
   for (outer = 1; outer <= MAX_OUTER; outer++) {
     let sTop = 0;
@@ -555,23 +571,41 @@ export function simulatePcbThermal(project: Project, boardId: string, opts: PcbT
         rhs[q] = src[q] + srcJ[q];
       }
     }
+    if (outer === 1) {
+      let loss = 0;
+      for (let q = 0; q < diag.length; q++) loss += diag[q] - sumG[q];
+      if (!(loss > 0))
+        throw new Error('simulatePcbThermal: the board has no heat-loss path (h = 0 on both faces, emissivity 0 and adiabatic edges)');
+    }
     const sys: GridSystem = { nx, ny, M, cellOf, n, gE, gN, gZ, diag };
     const mg = new GridMultigrid(sys);
     prev.set(theta);
-    const st = mg.solve(rhs, theta, { tol: 1e-8, maxIter: 500 });
+    // Inexact fixed-point iterations: intermediate solves only need to be accurate relative to
+    // how much the outer iteration still changes the field; the final solve goes to 1e-8.
+    const tol = outer === MAX_OUTER ? FINAL_TOL : Math.min(1e-4, Math.max(FINAL_TOL, 1e-2 * lastChange));
+    let st = mg.solve(rhs, theta, { tol, maxIter: 500 });
     iterations += st.iterations;
-    residual = st.residual;
-    converged = st.converged;
     let dmax = 0;
     let tmax = 0;
     for (let q = 0; q < theta.length; q++) {
       dmax = Math.max(dmax, Math.abs(theta[q] - prev[q]));
       tmax = Math.max(tmax, Math.abs(theta[q]));
     }
-    if (outer >= 2 && dmax <= 1e-4 * Math.max(tmax, 1e-2) && hChange < 1e-3) break;
+    lastChange = dmax / Math.max(tmax, 1e-2);
+    const done = (outer >= 2 && lastChange <= 1e-4 && hChange < 1e-3) || outer === MAX_OUTER;
+    if (done && tol > FINAL_TOL) {
+      st = mg.solve(rhs, theta, { tol: FINAL_TOL, maxIter: 500 });
+      iterations += st.iterations;
+    }
+    residual = st.residual;
+    converged = st.converged;
+    if (done) break;
   }
-  if (outer > MAX_OUTER) outer = MAX_OUTER;
   if (!converged) warnings.push(`thermal solver did not reach the 1e-8 residual target (residual ${residual.toExponential(2)})`);
+  if (lastChange > 1e-3) {
+    converged = false;
+    warnings.push(`convection/radiation/Joule-heating iteration not converged after ${MAX_OUTER} passes (last relative change ${lastChange.toExponential(1)})`);
+  }
   if (lostJoule > 1e-9) warnings.push(`${lostJoule.toExponential(2)} W of copper loss lies outside the board grid and was ignored`);
   if (network) traceResult = analyzeNetworks(board, network, opts.pinCurrents!, tempAt).result;
   if (traceResult) warnings.push(...traceResult.warnings);
@@ -670,9 +704,3 @@ export function simulatePcbThermal(project: Project, boardId: string, opts: PcbT
   };
 }
 
-/** Exposed for tests: board bounding box grid that simulatePcbThermal would use at a resolution. */
-export function thermalGridFor(board: Board, resolution?: number): Grid2 {
-  const bb = polygonBBox(board.outline);
-  const res = resolution ?? Math.max(0.4, Math.max(bb.maxX - bb.minX, bb.maxY - bb.minY) / 150);
-  return makeGrid(bb, res);
-}

@@ -156,7 +156,7 @@ function describeThermal(project: Project, r: PcbThermalResult): { summary: SimS
   const warnC = comps.filter((c) => c.status === 'warn');
   const badTraces = r.traces.filter((t) => t.status !== 'ok');
   const top = comps[0];
-  const warnings: string[] = [];
+  const warnings: string[] = [...((r as PcbThermalResult & { warnings?: string[] }).warnings ?? [])];
   for (const c of failing) warnings.push(`${c.ref}: Tj ${c.tJunction.toFixed(1)} °C exceeds ${c.tjMax ?? 125} °C`);
   for (const c of warnC) warnings.push(`${c.ref}: Tj ${c.tJunction.toFixed(1)} °C close to limit ${c.tjMax ?? 125} °C`);
   for (const t of badTraces.slice(0, 10)) warnings.push(`Trace ${t.traceId} seg ${t.segment}: ${t.current.toFixed(2)} A (IPC 10 °C capacity ${t.ipcCapacity.toFixed(2)} A, est. rise ${t.tempRise.toFixed(1)} °C)`);

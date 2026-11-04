@@ -472,26 +472,33 @@ export function gridForBBox(b: BBox3, h: number, pad = 0): GridSpec {
  * Fast volume/centroid estimate by rasterisation (≈ targetCells samples). Accuracy is typically a
  * few percent for walls ≥ 3 cells thick; use mesh-based massProperties for exact values.
  */
-export function estimateSolidVolume(s: Solid, targetCells = 400_000): { volume: number; centroid: Vec3; bbox: BBox3 | null } {
+export function estimateSolidVolume(s: Solid, targetCells = 600_000): { volume: number; centroid: Vec3; bbox: BBox3 | null } {
   const node = compileSolid(s);
   if (!node) return { volume: 0, centroid: [0, 0, 0], bbox: null };
   const b = node.bb;
   const vol = Math.max(1e-9, (b.max[0] - b.min[0]) * (b.max[1] - b.min[1]) * (b.max[2] - b.min[2]));
-  const h = Math.max(1e-3, Math.cbrt(vol / targetCells));
-  const g = gridForBBox(b, h);
-  const mask = rasterizeSolid(node, g);
-  let n = 0, sx = 0, sy = 0, sz = 0;
-  for (let k = 0; k < g.nz; k++)
-    for (let j = 0; j < g.ny; j++)
-      for (let i = 0; i < g.nx; i++) {
-        if (!mask[i + g.nx * (j + g.ny * k)]) continue;
-        n++;
-        sx += i;
-        sy += j;
-        sz += k;
-      }
-  const c: Vec3 = n ? [g.origin[0] + (sx / n + 0.5) * h, g.origin[1] + (sy / n + 0.5) * h, g.origin[2] + (sz / n + 0.5) * h] : [0, 0, 0];
-  return { volume: n * h * h * h, centroid: c, bbox: b };
+  // Several sub-cell-shifted grids are averaged: cell-centre sampling of thin walls aliases badly
+  // (a 2 mm wall at h = 0.8 counts as 1.6 or 2.4 mm); shifting the sample lattice cancels that bias.
+  const passes = 4;
+  const h = Math.max(1e-3, Math.cbrt(vol / (targetCells / passes)));
+  let total = 0, sx = 0, sy = 0, sz = 0;
+  for (let p = 0; p < passes; p++) {
+    const base = gridForBBox(b, h, 1);
+    const off: Vec3 = [((p * 0.25 + 0.03) % 1) * h, ((p * 0.25 + 0.155) % 1) * h, ((p * 0.25 + 0.0925) % 1) * h];
+    const g: GridSpec = { ...base, origin: [base.origin[0] + off[0], base.origin[1] + off[1], base.origin[2] + off[2]] };
+    const mask = rasterizeSolid(node, g);
+    for (let k = 0; k < g.nz; k++)
+      for (let j = 0; j < g.ny; j++)
+        for (let i = 0; i < g.nx; i++) {
+          if (!mask[i + g.nx * (j + g.ny * k)]) continue;
+          total++;
+          sx += g.origin[0] + (i + 0.5) * h;
+          sy += g.origin[1] + (j + 0.5) * h;
+          sz += g.origin[2] + (k + 0.5) * h;
+        }
+  }
+  const c: Vec3 = total ? [sx / total, sy / total, sz / total] : [0, 0, 0];
+  return { volume: (total / passes) * h * h * h, centroid: c, bbox: b };
 }
 
 /* ------------------------------------------ manifold -------------------------------------------- */

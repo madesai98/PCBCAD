@@ -347,8 +347,15 @@ describe('simulatePcbThermal', () => {
     expect(r.warnings.some((w) => /U9: .*not placed/.test(w))).toBe(true);
     expect(r.warnings.some((w) => /unknown component/.test(w))).toBe(true);
     expect(r.warnings.some((w) => /U8: part 'missing'/.test(w))).toBe(true);
+    expect(r.warnings.some((w) => /negative power .* U2/.test(w))).toBe(false); // u2 is not on the board
+    place(b, { id: 'bt1', partId: 'qfn', x: 30, y: 30, pinNets: {} });
+    const r2 = simulatePcbThermal(makeProject([b], [qfn]), b.id, { power: { u1: 0.3, bt1: -2 } });
+    expect(r2.warnings.filter((w) => /negative power/.test(w))).toEqual(['negative power (delivered by sources) treated as 0 for: BT1']);
     expect(r.components.find((c) => c.ref === 'U8')!.tBoard).toBeGreaterThan(25);
     expect(() => simulatePcbThermal(makeProject([b], [qfn]), 'nope', { power: {} })).toThrow(/not found/);
+    expect(() =>
+      simulatePcbThermal(makeProject([b], [qfn]), b.id, { power: { u1: 1 }, convection: { mode: 'natural', hTop: 0, hBottom: 0 }, emissivity: 0, edges: 'adiabatic' }),
+    ).toThrow(/no heat-loss path/);
   });
 
   it('performance: 100×80 mm board at 0.5 mm grid (2 × 32k unknowns) solves in < 2 s', () => {

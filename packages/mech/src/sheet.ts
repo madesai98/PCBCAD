@@ -124,6 +124,8 @@ export interface SheetModel {
   reliefWidth: number;
   reliefDepth: number;
   cornerGap: number;
+  /** Number of edge relief notches cut (partial-width flanges). */
+  reliefCount: number;
 }
 
 const D2R = Math.PI / 180;
@@ -199,7 +201,6 @@ function insertArc(loop: Vec2[], a: Vec2, b: Vec2, bulge: Vec2, tol = 1e-6): Vec
     if (near(p, a) && near(q, b)) from = a;
     else if (near(p, b) && near(q, a)) from = b;
     if (!from) continue;
-    const to = from === a ? b : a;
     const c: Vec2 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
     const r = Math.hypot(a[0] - b[0], a[1] - b[1]) / 2;
     if (r < 1e-6) return loop;
@@ -210,7 +211,6 @@ function insertArc(loop: Vec2[], a: Vec2, b: Vec2, bulge: Vec2, tol = 1e-6): Vec
       const phi = (Math.PI * k) / seg;
       arc.push([c[0] + r * (Math.cos(phi) * uf[0] + Math.sin(phi) * bulge[0]), c[1] + r * (Math.cos(phi) * uf[1] + Math.sin(phi) * bulge[1])]);
     }
-    void to;
     return [...loop.slice(0, i + 1), ...arc, ...loop.slice(i + 1)];
   }
   return loop;
@@ -264,6 +264,7 @@ interface BuildCtx {
   rdx: number;
   cgap: number;
   reliefs: 'rect' | 'obround' | 'none';
+  reliefCount: number;
 }
 
 function bendParams(fl: SheetFlange, c: BuildCtx): { theta: number; r: number; sb: number; ba: number } | null {
@@ -318,6 +319,7 @@ function addFlange(c: BuildCtx, parent: SheetFaceModel, e: Edge2, fl: SheetFlang
     const mk = (lo: number, hi: number) => {
       const w = hi - lo;
       if (w <= 1e-6) return;
+      c.reliefCount++;
       if (c.reliefs === 'obround' && depth > w / 2) {
         const d0 = depth - w / 2;
         parent.removals.push(edgeRect(e, lo, hi, 0, d0));
@@ -490,6 +492,7 @@ export function buildSheetModel(part: SheetMetalPart): SheetModel {
     rdx: Math.max(0, Number(po.reliefDepth ?? Math.max(t, 0.5))),
     cgap: Math.max(0.05, Number(po.cornerGap ?? Math.max(0.5 * t, 0.3))),
     reliefs: part.reliefs ?? 'rect',
+    reliefCount: 0,
   };
   const base = newFace('base', {
     o: [0, 0, 0],
@@ -590,7 +593,7 @@ export function buildSheetModel(part: SheetMetalPart): SheetModel {
     f.poly = loop;
     f.voids = u.holes;
   }
-  return { part, t, faces: c.faces, bends: c.bends, issues: c.issues, reliefWidth: c.rw, reliefDepth: c.rdx, cornerGap: c.cgap };
+  return { part, t, faces: c.faces, bends: c.bends, issues: c.issues, reliefWidth: c.rw, reliefDepth: c.rdx, cornerGap: c.cgap, reliefCount: c.reliefCount };
 }
 
 /** 3D solid of a sheet-metal part (union of flat faces and cylindrical bend zones). */

@@ -449,7 +449,7 @@ export function buildPcbScene(board: Board, parts: Record<string, PartDef>): Pcb
       const along = lw >= lh * 0.9 ? 0 : 90;
       const long = along === 0 ? lw : lh;
       const short = along === 0 ? lh : lw;
-      const size = Math.max(0.25, Math.min(short * 0.5, (long * 0.85) / Math.max(1.5, comp.ref.length * 0.8), 2.2));
+      const size = Math.max(0.25, Math.min(short * 0.45, (long * 0.8) / Math.max(1.5, comp.ref.length * 0.85), 1.1));
       let rot = (placedAs.rotation || 0) + along;
       rot = ((rot % 360) + 360) % 360;
       sc.fabRef = { x: sc.center[0], y: sc.center[1], size, rot };
@@ -496,7 +496,7 @@ export function buildPcbScene(board: Board, parts: Record<string, PartDef>): Pcb
       if (st) return;
       const hadRef = graphicsToSilk(fp.graphics, 'silk', placedAs, ci, comp.ref, silkStrokes[side], silkFills[side], silkTexts[side]);
       graphicsToSilk(fp.graphics, 'courtyard', placedAs, ci, comp.ref, courtStrokes[side], new Path2D(), []);
-      if (!hadRef) {
+      if (!hadRef && fp.pads.length) {
         // Default refdes: above the courtyard (board frame), small parts; centred for large bodies.
         const w = cbox.maxX - cbox.minX;
         const h = cbox.maxY - cbox.minY;

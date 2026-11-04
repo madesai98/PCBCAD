@@ -237,6 +237,7 @@ export function zoneIslands(zone: Zone, board: Board): Island[] {
   return islands.filter((s) => s.area > 1e-9);
 }
 
+/** True when point p (board frame, mm) lies in the island's copper (inside the outer ring, outside its holes). */
 export function inIsland(p: Vec2, s: Island): boolean {
   if (p[0] < s.minX || p[0] > s.maxX || p[1] < s.minY || p[1] > s.maxY) return false;
   if (!pointInPolygon(p, s.outer)) return false;
@@ -374,6 +375,7 @@ function buildNet(
     if (tr.netId !== netId || !layerSet.has(tr.layer)) return;
     if (!(tr.width > 0) || !tr.points || tr.points.length < 2) return;
     const tcu = layerCopperMm(stack, tr.layer);
+    if (!(tcu > 0) || !Number.isFinite(tcu)) return;
     const ids = tr.points.map((p) => vertex(tr.layer, p[0], p[1]));
     let vl = vertsByLayer.get(tr.layer);
     if (!vl) vertsByLayer.set(tr.layer, (vl = []));
@@ -516,7 +518,13 @@ function buildNet(
       const Lc = Math.sqrt(isl.area / Math.PI);
       const spread = (a: number) => (rs20 / (2 * Math.PI)) * Math.log(Math.max(2, Lc / Math.max(a, 1e-3)));
       let hub = -1;
+      // One attachment per copper blob: pads first (largest contact), then vias, then trace
+      // vertices; anything already merged into an attached node is skipped.
+      const attached = new Set<number>();
       const attach = (node: number, x: number, y: number, r: number) => {
+        const rt = uf.find(node);
+        if (attached.has(rt)) return;
+        attached.add(rt);
         if (hub < 0) hub = newNode((isl.minX + isl.maxX) / 2, (isl.minY + isl.maxY) / 2);
         edges.push({ a: node, b: hub, r20: r, kind: 'zone', seg: -1, layer: L, ax: x, ay: y, bx: x, by: y });
       };

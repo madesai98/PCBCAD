@@ -9,9 +9,15 @@
  * which keeps memory small for the repetitive patterns of voxel models. Clamped fine DOFs are handled by
  * masking the prolongation (P := Z P); coarse nodes that only feed clamped/void DOFs become inactive.
  *
- * Smoother: damped 3×3 block Jacobi (ν pre = ν post), damping from a power-iteration estimate of
- * λmax(D⁻¹A) on each level, which keeps the V-cycle symmetric positive definite for PCG.
+ * Smoother: Chebyshev polynomial (default degree 1, i.e. optimally damped Jacobi) in the 3×3-block-Jacobi-preconditioned operator
+ * D⁻¹A, targeting [λmax/30, 1.1·λmax] with λmax from a power iteration on each level (damped block
+ * Jacobi is available as an option). Pre- and post-smoothers are identical polynomials, so the V-cycle is
+ * a symmetric positive definite preconditioner for PCG.
  * Coarsest level: dense Cholesky on the active DOFs (with a pivot guard for semi-definite blocks).
+ *
+ * Known limitation: for walls only 1–2 voxels thick the trilinear coarse spaces shear-lock in bending, so
+ * iteration counts rise from ~12–20 (bulky parts) to ~60–100 (thin-walled enclosures). Counts stay
+ * mesh-independent. A smoothed-aggregation coarse space with rotational modes would remove this.
  */
 
 export interface FineInput {
@@ -118,109 +124,6 @@ function addTransformed(out: Float64Array, src: Float64Array, off: number, s: nu
       for (let c = 0; c < 24; c++) out[ro + c] += ws * MP[mo + c];
     }
   }
-}
-
-/**
- * Octant tables for the bubble-enriched transfer used to build locking-free coarse operators.
- * Columns 0..23 are the parent's trilinear corner DOFs, columns 24..32 the 9 parent-cell bubble DOFs
- * (1-ξ², 1-η², 1-ζ²) × (x, y, z). A bubble in direction m is 1 at child nodes on the parent's mid-plane
- * t_m = 1 and 0 at the parent's corner planes.
- */
-const OCT_ENRICHED: { r: Int8Array; c: Int8Array; w: Float64Array }[] = OCT_TRIPLES.map((tr, o) => {
-  const R: number[] = [];
-  const C: number[] = [];
-  const W: number[] = [];
-  for (let t = 0; t < tr.a.length; t++)
-    for (let d = 0; d < 3; d++) {
-      R.push(tr.a[t] * 3 + d);
-      C.push(tr.p[t] * 3 + d);
-      W.push(tr.w[t]);
-    }
-  for (let a = 0; a < 8; a++) {
-    const tpos = [(o & 1) + (a & 1), ((o >> 1) & 1) + ((a >> 1) & 1), ((o >> 2) & 1) + ((a >> 2) & 1)];
-    for (let m = 0; m < 3; m++) {
-      if (tpos[m] !== 1) continue;
-      for (let d = 0; d < 3; d++) {
-        R.push(a * 3 + d);
-        C.push(24 + 3 * m + d);
-        W.push(1);
-      }
-    }
-  }
-  return { r: Int8Array.from(R), c: Int8Array.from(C), w: Float64Array.from(W) };
-});
-
-const TMP_MP33 = new Float64Array(24 * 33);
-
-/** out (33×33) += s · P_encᵀ M P_enc with masked child corners (see OCT_ENRICHED). */
-function addEnriched(out: Float64Array, src: Float64Array, off: number, s: number, oct: number, freeBits: number): void {
-  const { r: ER, c: EC, w: EW } = OCT_ENRICHED[oct];
-  const ne = ER.length;
-  const MP = TMP_MP33;
-  MP.fill(0);
-  for (let t = 0; t < ne; t++) {
-    const rr = ER[t];
-    if (!(freeBits & (1 << ((rr / 3) | 0)))) continue;
-    const cc = EC[t];
-    const w = EW[t];
-    for (let row = 0; row < 24; row++) MP[row * 33 + cc] += w * src[off + row * 24 + rr];
-  }
-  for (let t = 0; t < ne; t++) {
-    const rr = ER[t];
-    if (!(freeBits & (1 << ((rr / 3) | 0)))) continue;
-    const ws = EW[t] * s;
-    const mo = rr * 33;
-    const oo = EC[t] * 33;
-    for (let col = 0; col < 33; col++) out[oo + col] += ws * MP[mo + col];
-  }
-}
-
-const TMP_BB = new Float64Array(81);
-const TMP_BC = new Float64Array(9 * 24);
-
-/**
- * Static condensation of the 9 bubble DOFs: out (24×24) = E_cc − E_cb E_bb⁻¹ E_bc.
- * Bubbles with a negligible pivot (no stiffness, e.g. fully clamped mid-plane) are dropped.
- */
-function condenseBubbles(E: Float64Array, out: Float64Array): void {
-  const bb = TMP_BB;
-  const bc = TMP_BC;
-  let maxDiag = 0;
-  for (let i = 0; i < 9; i++) {
-    for (let j = 0; j < 9; j++) bb[i * 9 + j] = E[(24 + i) * 33 + 24 + j];
-    for (let j = 0; j < 24; j++) bc[i * 24 + j] = E[(24 + i) * 33 + j];
-    maxDiag = Math.max(maxDiag, bb[i * 9 + i]);
-  }
-  // Gauss–Jordan on [bb | bc] (symmetric positive semi-definite bb; diagonal pivoting is enough)
-  const dropped = new Uint8Array(9);
-  for (let k = 0; k < 9; k++) {
-    const piv = bb[k * 9 + k];
-    if (!(piv > 1e-10 * maxDiag)) {
-      dropped[k] = 1;
-      for (let j = 0; j < 9; j++) bb[k * 9 + j] = 0;
-      for (let j = 0; j < 24; j++) bc[k * 24 + j] = 0;
-      continue;
-    }
-    for (let i = 0; i < 9; i++) {
-      if (i === k || dropped[i]) continue;
-      const f = bb[i * 9 + k] / piv;
-      if (f === 0) continue;
-      for (let j = 0; j < 9; j++) bb[i * 9 + j] -= f * bb[k * 9 + j];
-      for (let j = 0; j < 24; j++) bc[i * 24 + j] -= f * bc[k * 24 + j];
-    }
-  }
-  // X = bb⁻¹ bc (rows of dropped bubbles stay zero)
-  for (let k = 0; k < 9; k++) {
-    if (dropped[k]) continue;
-    const piv = bb[k * 9 + k];
-    for (let j = 0; j < 24; j++) bc[k * 24 + j] /= piv;
-  }
-  for (let i = 0; i < 24; i++)
-    for (let j = 0; j < 24; j++) {
-      let v = E[i * 33 + j];
-      for (let k = 0; k < 9; k++) v -= E[i * 33 + 24 + k] * bc[k * 24 + j];
-      out[i * 24 + j] = v;
-    }
 }
 
 /** y = A x (EbE), followed by zeroing of non-free DOFs. */
@@ -391,7 +294,7 @@ function makeLevel(
 }
 
 /** Build the next coarser level (Galerkin, de-duplicated cell matrices) and the transfer from C. */
-function coarsen(C: Level, fineSlotG: Float64Array | null, bubbles: boolean): Level {
+function coarsen(C: Level, fineSlotG: Float64Array | null): Level {
   const nC = C.nCells;
   let PX = 0;
   let PY = 0;
@@ -468,28 +371,21 @@ function coarsen(C: Level, fineSlotG: Float64Array | null, bubbles: boolean): Le
     cellId[p] = id;
   }
   const pool = new Float64Array(rep.length * 576);
-  const E33 = new Float64Array(33 * 33);
-  const G = bubbles ? 1089 : 576;
   for (let id = 0; id < rep.length; id++) {
     const p = rep[id];
     const out = pool.subarray(id * 576, id * 576 + 576);
-    const acc = bubbles ? E33 : out;
-    if (bubbles) E33.fill(0);
     for (let o = 0; o < 8; o++) {
       const c = childOf[p * 8 + o];
       if (c < 0) continue;
       const s = C.cellScale[c];
       if (isFine && C.freeBits![c] === 0xff) {
         const slot = C.cellOff[c] / 576;
-        const g = (slot * 8 + o) * G;
-        for (let q = 0; q < G; q++) acc[q] += s * fineSlotG![g + q];
-      } else if (bubbles) {
-        addEnriched(acc, C.pool, C.cellOff[c], s, o, isFine ? C.freeBits![c] : 0xff);
+        const g = (slot * 8 + o) * 576;
+        for (let q = 0; q < 576; q++) out[q] += s * fineSlotG![g + q];
       } else {
-        addTransformed(acc, C.pool, C.cellOff[c], s, o, isFine ? C.freeBits![c] : 0xff);
+        addTransformed(out, C.pool, C.cellOff[c], s, o, isFine ? C.freeBits![c] : 0xff);
       }
     }
-    if (bubbles) condenseBubbles(E33, out);
     // symmetrise (round-off)
     for (let r = 0; r < 24; r++)
       for (let q = r + 1; q < 24; q++) {
@@ -542,7 +438,7 @@ export interface MgOptions {
   /** Stop coarsening once the active DOF count is at most this (default 900). */
   maxCoarseDofs?: number;
   maxLevels?: number;
-  /** Smoothing steps (Jacobi) or polynomial degree (Chebyshev) per side (default 2). */
+  /** Smoothing steps (Jacobi) or polynomial degree (Chebyshev) per side (default 1: fastest overall). */
   smoothSteps?: number;
   /** Smoother type (default 'chebyshev'). */
   smoother?: 'jacobi' | 'chebyshev';
@@ -550,11 +446,6 @@ export interface MgOptions {
   omegaFactor?: number;
   /** Chebyshev: lower bound of the smoothed spectrum = λmax / ratio (default 30). */
   chebyRatio?: number;
-  /**
-   * Build coarse operators with condensed coarse-cell bubble modes (default true). Plain Galerkin
-   * trilinear coarse spaces shear-lock for thin walls; the bubbles remove that locking.
-   */
-  coarseBubbles?: boolean;
 }
 
 /** Process-wide default options (tuning hook; per-call options take precedence). */
@@ -567,6 +458,7 @@ export class ElasticMultigrid {
   private coarseN = 0;
   private coarseL!: Float64Array;
   private coarseNull!: Uint8Array;
+  private coarseY!: Float64Array;
   private readonly smooth: number;
   private readonly cheby: boolean;
   private readonly chebyRatio: number;
@@ -578,7 +470,7 @@ export class ElasticMultigrid {
     const opts: MgOptions = { ...mgDefaults, ...options };
     const maxCoarse = opts.maxCoarseDofs ?? 900;
     const maxLevels = opts.maxLevels ?? 12;
-    this.smooth = Math.max(1, opts.smoothSteps ?? 2);
+    this.smooth = Math.max(1, opts.smoothSteps ?? 1);
     this.cheby = (opts.smoother ?? 'chebyshev') === 'chebyshev';
     this.chebyRatio = opts.chebyRatio ?? 30;
     const omegaFactor = opts.omegaFactor ?? 1.3;
@@ -609,19 +501,16 @@ export class ElasticMultigrid {
     this.levels.push(L0);
     // unit-scale transformed slot matrices for unmasked fine elements
     const nSlots = fine.slotScale.length;
-    const bubbles = opts.coarseBubbles ?? true;
-    const G = bubbles ? 1089 : 576;
-    const slotG = new Float64Array(nSlots * 8 * G);
+    const slotG = new Float64Array(nSlots * 8 * 576);
     for (let s = 0; s < nSlots; s++)
       for (let o = 0; o < 8; o++) {
-        const out = slotG.subarray((s * 8 + o) * G, (s * 8 + o + 1) * G);
-        if (bubbles) addEnriched(out, fine.slotK, s * 576, 1, o, 0xff);
-        else addTransformed(out, fine.slotK, s * 576, 1, o, 0xff);
+        const out = slotG.subarray((s * 8 + o) * 576, (s * 8 + o + 1) * 576);
+        addTransformed(out, fine.slotK, s * 576, 1, o, 0xff);
       }
     while (this.levels.length < maxLevels) {
       const L = this.levels[this.levels.length - 1];
       if (activeDofs(L) <= maxCoarse || L.nCells <= 1) break;
-      const P = coarsen(L, this.levels.length === 1 ? slotG : null, bubbles);
+      const P = coarsen(L, this.levels.length === 1 ? slotG : null);
       buildDiag(P, true);
       this.levels.push(P);
     }
@@ -836,13 +725,14 @@ export class ElasticMultigrid {
     this.coarseN = N;
     this.coarseL = A;
     this.coarseNull = nul;
+    this.coarseY = new Float64Array(N);
   }
 
   private solveCoarsest(b: Float64Array, x: Float64Array): void {
     const L = this.levels[this.levels.length - 1];
     const N = this.coarseN;
     const A = this.coarseL;
-    const y = new Float64Array(N);
+    const y = this.coarseY;
     for (let nd = 0; nd < L.nNodes; nd++) {
       const i = this.coarseDof[nd];
       if (i < 0) continue;

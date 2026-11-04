@@ -275,7 +275,8 @@ function solveNet(net: NetNetwork, pinCurrents: PinCurrent[], tempAt: CopperTemp
 
   const v = new Float64Array(N);
   let maxDrop = 0;
-  let unrouted = 0;
+  let surplus = 0; // Σ of island imbalances that must leave through missing copper
+  let deficit = 0; // Σ of island imbalances that must arrive through missing copper
   const local = new Int32Array(N).fill(-1);
   for (const [c, nodes] of islands) {
     let pos = 0;
@@ -287,7 +288,8 @@ function solveNet(net: NetNetwork, pinCurrents: PinCurrent[], tempAt: CopperTemp
     if (pos + neg <= 1e-15) continue;
     const imbalance = pos - neg;
     if (Math.abs(imbalance) > 1e-9 + 1e-6 * Math.max(pos, neg)) {
-      unrouted += Math.abs(imbalance);
+      if (imbalance > 0) surplus += imbalance;
+      else deficit -= imbalance;
       // Scale down the over-represented side so the island balances: the routed copper then
       // carries exactly the current of the routed loads/sources.
       if (pos > neg) {
@@ -329,6 +331,7 @@ function solveNet(net: NetNetwork, pinCurrents: PinCurrent[], tempAt: CopperTemp
     }
     if (vmax > vmin) maxDrop = Math.max(maxDrop, vmax - vmin);
   }
+  const unrouted = Math.max(surplus, deficit);
   if (unrouted > 1e-9) warnings.push(`Net ${net.netName}: ${fmtA(unrouted)} of pin current has no complete copper path (incomplete routing?); only the routed part was analysed`);
   // node potentials for all nodes (non-representatives take their root's value)
   for (let i = 0; i < N; i++) if (root[i] !== i) v[i] = v[root[i]];

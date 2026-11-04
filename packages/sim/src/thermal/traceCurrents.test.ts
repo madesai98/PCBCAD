@@ -118,6 +118,31 @@ describe('computeTraceCurrents', () => {
     expect(res.traces).toEqual([]);
   });
 
+  it('trace inside a zone of its own net: trace ∥ plane, each copper blob attached once', () => {
+    const b = setup();
+    b.zones.push({ id: 'z', netId: 'vcc', layer: 'top', clearance: 0.3 });
+    b.traces.push(trace('t', 'vcc', [[5, 15], [45, 15]], 0.5));
+    const I = 2;
+    const res = computeTraceCurrents(b, parts, { j1: { '1': -I }, r1: { '1': I } }, { temperature: T });
+    const Rs = rho / (t1oz * 1e-3);
+    const Rspread = (Rs / (2 * Math.PI)) * Math.log(Math.sqrt(1500 / Math.PI) / Math.sqrt(2.25 / Math.PI));
+    const Rt = Rtrace(40, 0.5);
+    const Req = 1 / (1 / Rt + 1 / (2 * Rspread));
+    expect(Math.abs(res.netDrops[0].maxDrop / (I * Req) - 1)).toBeLessThan(1e-6);
+    expect(res.traces[0].current).toBeCloseTo((I * Req) / Rt, 9);
+  });
+
+  it('via-in-pad connects a bottom-layer trace to top-side pads', () => {
+    const b = setup();
+    b.vias.push({ id: 'v1', netId: 'vcc', x: 5, y: 15, drill: 0.3, diameter: 0.6 });
+    b.vias.push({ id: 'v2', netId: 'vcc', x: 45, y: 15, drill: 0.3, diameter: 0.6 });
+    b.traces.push(trace('t', 'vcc', [[5, 15], [45, 15]], 0.5, 'bottom'));
+    const res = computeTraceCurrents(b, parts, { j1: { '1': -1 }, r1: { '1': 1 } }, { temperature: T });
+    const Rvia = (rho * 1.6e-3) / (Math.PI * 25e-6 * (0.3e-3 + 25e-6));
+    expect(res.traces[0].current).toBeCloseTo(1, 9);
+    expect(Math.abs(res.netDrops[0].maxDrop / (Rtrace(40, 0.5) + 2 * Rvia) - 1)).toBeLessThan(1e-6);
+  });
+
   it('partially routed net: only routed loads are analysed, with a warning', () => {
     const b = setup([
       ['r1', 45, 15],
@@ -127,7 +152,15 @@ describe('computeTraceCurrents', () => {
     const res = computeTraceCurrents(b, parts, { j1: { '1': -1 }, r1: { '1': 0.6 }, r2: { '1': 0.4 } });
     expect(res.traces[0].current).toBeCloseTo(0.6, 9);
     expect(res.netDrops[0].current).toBeCloseTo(1, 12);
-    expect(res.warnings.some((w) => /incomplete routing/.test(w))).toBe(true);
+    expect(res.warnings.some((w) => /0\.40 A of pin current .*incomplete routing/.test(w))).toBe(true);
+  });
+
+  it('unrouted net: no segments, the missing current is counted once', () => {
+    const b = setup();
+    const res = computeTraceCurrents(b, parts, { j1: { '1': -1 }, R1: { '1': 1 } }); // second key by ref
+    expect(res.traces).toEqual([]);
+    expect(res.netDrops).toEqual([{ netId: 'vcc', name: 'VCC', maxDrop: 0, current: 1 }]);
+    expect(res.warnings).toEqual(['Net VCC: 1.00 A of pin current has no complete copper path (incomplete routing?); only the routed part was analysed']);
   });
 
   it('flags overloaded traces against IPC-2221', () => {

@@ -1,5 +1,5 @@
 import type { CopperLayer, Stackup } from '@pcbcad/core';
-import { COPPER_RESISTIVITY, COPPER_TEMPCO, copperOzToMm, getMaterial } from '@pcbcad/core';
+import { COPPER_TEMPCO, copperOzToMm, getMaterial } from '@pcbcad/core';
 
 /**
  * Stackup helpers shared by the electrical (trace current) and thermal models.
@@ -23,6 +23,7 @@ export function stackLayers(stackup: Stackup): CopperLayer[] {
   return ['top', 'bottom'];
 }
 
+/** True for the outer (top/bottom) copper layers, which use `copperOz.outer` and IPC external rules. */
 export function isOuterLayer(layer: CopperLayer): boolean {
   return layer === 'top' || layer === 'bottom';
 }
@@ -80,12 +81,7 @@ export function barrelAreaMm2(drillMm: number, plating = PLATING_THICKNESS_MM): 
   return Math.PI * plating * (d + plating);
 }
 
-/** Copper resistivity (Ω·m) at temperature `tC` (°C), linear tempco about 20 °C. */
-export function copperResistivity(tC: number): number {
-  return COPPER_RESISTIVITY * (1 + COPPER_TEMPCO * (tC - 20));
-}
-
-/** Resistance multiplier relative to 20 °C. */
+/** Copper resistance multiplier at `tC` (°C) relative to 20 °C: 1 + 0.00393·(T − 20). */
 export function copperTempFactor(tC: number): number {
   return 1 + COPPER_TEMPCO * (tC - 20);
 }

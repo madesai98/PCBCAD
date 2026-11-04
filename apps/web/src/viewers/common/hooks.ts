@@ -48,7 +48,13 @@ export function useLatest<T>(value: T): React.RefObject<T> {
 export function useRafCallback(fn: () => void): () => void {
   const fnRef = useLatest(fn);
   const raf = useRef(0);
-  useEffect(() => () => cancelAnimationFrame(raf.current), []);
+  useEffect(
+    () => () => {
+      cancelAnimationFrame(raf.current);
+      raf.current = 0;
+    },
+    [],
+  );
   return useCallback(() => {
     if (raf.current) return;
     raf.current = requestAnimationFrame(() => {

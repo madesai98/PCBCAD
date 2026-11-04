@@ -31,8 +31,10 @@ export interface PcbOverlay {
   issues?: DesignIssue[];
   /** Unrouted connections. When omitted the view computes its own ratsnest from copper connectivity. */
   ratsnest?: RatsnestEdge[];
-  /** Colour traces by current density (needs `thermal` with trace results). */
+  /** Colour traces by current density (uses `currents`, else `thermal`, for the per-trace results). */
   traceCurrents?: boolean;
+  /** Thermal result used only for trace currents (lets the heatmap stay off while currents are shown). */
+  currents?: PcbThermalResult;
 }
 
 export interface PcbHoverInfo {
@@ -132,10 +134,11 @@ export function PcbView(props: PcbViewProps) {
 
   const scene = useMemo<PcbScene>(() => buildPcbScene(board, parts), [board, parts]);
   const thermal = overlay?.thermal && overlay.thermal.boardId === board.id ? overlay.thermal : undefined;
+  const currentSrc = overlay?.currents && overlay.currents.boardId === board.id ? overlay.currents : thermal;
   const showHeat = !!thermal && !overlay?.traceCurrents;
   const thermalImg = useMemo(() => (thermal ? buildThermalImage(thermal, side) : null), [thermal, side]);
   const thermalLabels = useMemo(() => (thermal && thermalImg ? thermalLabelsFor(scene, thermal, thermalImg) : []), [scene, thermal, thermalImg]);
-  const currents = useMemo(() => (overlay?.traceCurrents && thermal ? buildCurrentOverlay(scene, thermal) : null), [overlay?.traceCurrents, thermal, scene]);
+  const currents = useMemo(() => (overlay?.traceCurrents && currentSrc ? buildCurrentOverlay(scene, currentSrc) : null), [overlay?.traceCurrents, currentSrc, scene]);
   const issueMarkers = useMemo(() => buildIssueMarkers(scene, overlay?.issues), [scene, overlay?.issues]);
   const providedRats = overlay?.ratsnest;
   const ratsnest = useMemo(() => (providedRats ? providedRats : layers.ratsnest ? computeRatsnest(scene) : null), [providedRats, layers.ratsnest, scene]);
@@ -221,7 +224,7 @@ export function PcbView(props: PcbViewProps) {
   const fitBox = useCallback(() => {
     const s = sceneRef.current;
     const b = s.contentBox;
-    const pad = 4;
+    const pad = 1.5;
     return { minX: b.minX - pad, minY: b.minY - pad, maxX: b.maxX + pad, maxY: b.maxY + pad };
   }, [sceneRef]);
 
@@ -229,7 +232,7 @@ export function PcbView(props: PcbViewProps) {
     (animate = true) => {
       const { width, height } = sizeRef.current;
       if (width < 2 || height < 2) return;
-      const v = fitView(fitBox(), width, height, { padding: Math.min(48, Math.max(12, width * 0.04)), flipY: true, mirrorX: drawState.current.side === 'bottom' });
+      const v = fitView(fitBox(), width, height, { padding: Math.min(36, Math.max(12, Math.min(width, height) * 0.06)), flipY: true, mirrorX: drawState.current.side === 'bottom' });
       fitKRef.current = v.k;
       if (animate && pzRef.current) pzRef.current.animateTo(v);
       else {
@@ -497,7 +500,7 @@ export function PcbView(props: PcbViewProps) {
         </div>
       </div>
 
-      {hover && <PcbTooltip info={hover.info} sx={hover.sx} sy={hover.sy} w={size.width} h={size.height} thermal={thermal} />}
+      {hover && <PcbTooltip info={hover.info} sx={hover.sx} sy={hover.sy} w={size.width} h={size.height} thermal={currentSrc} />}
     </div>
   );
 }

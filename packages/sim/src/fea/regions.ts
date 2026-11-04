@@ -57,10 +57,6 @@ export function isExposed(g: RegionGrid, i: number, j: number, k: number, dir: n
   }
 }
 
-function clampInt(v: number, lo: number, hi: number): number {
-  return v < lo ? lo : v > hi ? hi : v;
-}
-
 /** Collect solid voxels in an index box whose centre satisfies `inside`. */
 function scanBox(
   g: RegionGrid,
@@ -74,12 +70,13 @@ function scanBox(
 ): number[] {
   const out: number[] = [];
   const { nx, ny, nz, h, origin, solid } = g;
-  i0 = clampInt(i0, 0, nx - 1);
-  j0 = clampInt(j0, 0, ny - 1);
-  k0 = clampInt(k0, 0, nz - 1);
-  i1 = clampInt(i1, 0, nx - 1);
-  j1 = clampInt(j1, 0, ny - 1);
-  k1 = clampInt(k1, 0, nz - 1);
+  // intersect the index box with the grid (an empty intersection selects nothing)
+  i0 = Math.max(i0, 0);
+  j0 = Math.max(j0, 0);
+  k0 = Math.max(k0, 0);
+  i1 = Math.min(i1, nx - 1);
+  j1 = Math.min(j1, ny - 1);
+  k1 = Math.min(k1, nz - 1);
   for (let k = k0; k <= k1; k++) {
     const z = origin[2] + (k + 0.5) * h;
     for (let j = j0; j <= j1; j++) {

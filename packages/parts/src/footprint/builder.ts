@@ -9,7 +9,7 @@ export const CRT_W = 0.05;
 /** Silkscreen-to-pad clearance (JLCPCB minimum 0.15 + margin). */
 export const SILK_PAD_CLEAR = 0.2;
 /** Shortest silkscreen segment kept after clipping. */
-const MIN_SILK_SEG = 0.25;
+const MIN_SILK_SEG = 0.2;
 
 export interface Box {
   minX: number;

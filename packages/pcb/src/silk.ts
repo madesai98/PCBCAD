@@ -19,8 +19,8 @@ export interface SilkArt {
   hasRefText: boolean;
 }
 
-const REF_PLACEHOLDERS = /REF\*\*|\$\{REFERENCE\}|%R|\{ref\}/g;
-const VALUE_PLACEHOLDERS = /\$\{VALUE\}|%V|\{value\}/g;
+const REF_PLACEHOLDER = /REF\*\*|\$\{REFERENCE\}|%R|\{ref\}/;
+const VALUE_PLACEHOLDER = /\$\{VALUE\}|%V|\{value\}/;
 
 function arcPoints(c: Vec2, r: number, startDeg: number, endDeg: number): Vec2[] {
   let sweep = endDeg - startDeg;
@@ -69,9 +69,8 @@ export function footprintSilk(comp: ComponentInstance, fp: FootprintDef, value?:
         break;
       case 'text': {
         let text = g.text;
-        if (REF_PLACEHOLDERS.test(text)) hasRefText = true;
-        REF_PLACEHOLDERS.lastIndex = 0;
-        text = text.replace(REF_PLACEHOLDERS, comp.ref).replace(VALUE_PLACEHOLDERS, value ?? comp.value ?? '');
+        if (REF_PLACEHOLDER.test(text)) hasRefText = true;
+        text = text.replace(new RegExp(REF_PLACEHOLDER.source, 'g'), comp.ref).replace(new RegExp(VALUE_PLACEHOLDER.source, 'g'), value ?? comp.value ?? '');
         if (text === comp.ref) hasRefText = true;
         const w = strokeWidthFor(g.size);
         for (const s of strokeText(text, { at: g.at, size: g.size, rotation: g.rotation, justify: 'center', vjustify: 'middle' })) strokes.push({ pts: s.map(T), width: w });

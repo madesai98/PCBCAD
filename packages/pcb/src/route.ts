@@ -61,7 +61,8 @@ const DY = [0, 1, 1, 1, 0, -1, -1, -1];
 /** Bend penalty (mm) by number of 45° steps between successive move directions. */
 const BEND = [0, 0.08, 0.3, 1.5, 4];
 const EPSR = 1e-4;
-const MAX_CELLS = 3_000_000;
+/** Grid budget: nodes = cells × routing layers (≈55 bytes each). The pitch is coarsened beyond it. */
+const MAX_NODES = 1_500_000;
 /** Penalty (mm) for entering a node blocked only by another net's router-placed copper (rip-up mode). */
 const SOFT_PENALTY = 4;
 
@@ -463,8 +464,8 @@ class Router {
   private setupGrid(): void {
     const bb = boardBBox(this.board);
     let g = this.g;
-    const cells = () => ((bb.maxX - bb.minX) / g + 4) * ((bb.maxY - bb.minY) / g + 4);
-    if (cells() > MAX_CELLS) g = g * Math.sqrt(cells() / MAX_CELLS) * 1.01;
+    const nodes = () => ((bb.maxX - bb.minX) / g + 4) * ((bb.maxY - bb.minY) / g + 4) * Math.max(1, this.nL);
+    if (nodes() > MAX_NODES) g = g * Math.sqrt(nodes() / MAX_NODES) * 1.01;
     this.g = g;
     this.ox = Math.floor(bb.minX / g) * g - g;
     this.oy = Math.floor(bb.minY / g) * g - g;

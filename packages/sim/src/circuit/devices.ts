@@ -599,11 +599,6 @@ abstract class MultiTerminalModel extends Model {
   /** Fill I and G for controls u. `limit` = true during Newton (apply junction limiting to u). */
   protected abstract evaluate(u: Float64Array, I: Float64Array, G: Float64Array, c: LoadCtx | null): void;
 
-  /** Controls used for this iteration (subclasses may swap terminals, e.g. MOSFET reverse mode). */
-  protected activeCtrl(): Int32Array {
-    return this.ctrl;
-  }
-
   load(c: LoadCtx): void {
     const ctrl = this.activeCtrlFor(c.x);
     this.computeControls(c.x, ctrl, this.u);

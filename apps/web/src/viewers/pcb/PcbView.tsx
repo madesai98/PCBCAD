@@ -71,6 +71,8 @@ export interface PcbViewProps {
   side?: 'top' | 'bottom';
   /** Show the built-in toolbar (default true). */
   toolbar?: boolean;
+  /** Called after every frame with the draw time in ms (perf HUDs). */
+  onDrawStats?: (ms: number) => void;
   className?: string;
   style?: React.CSSProperties;
 }
@@ -173,6 +175,7 @@ export function PcbView(props: PcbViewProps) {
     ratsnest,
   });
   const sceneRef = useLatest(scene);
+  const onDrawStatsRef = useLatest(props.onDrawStats);
 
   const viewport = useCallback((): PcbViewport | null => {
     const canvas = canvasRef.current;
@@ -197,6 +200,7 @@ export function PcbView(props: PcbViewProps) {
     const ctx = canvas.getContext('2d');
     const vp = viewport();
     if (!ctx || !vp) return;
+    const t0 = performance.now();
     drawPcb(ctx, sceneRef.current, vp, {
       ...drawState.current,
       buffer: () => {
@@ -212,8 +216,9 @@ export function PcbView(props: PcbViewProps) {
         return b;
       },
     });
+    onDrawStatsRef.current?.(performance.now() - t0);
     if (zoomRef.current) zoomRef.current.textContent = `${Math.round((viewRef.current.k / fitKRef.current) * 100)}%`;
-  }, [drawState, sceneRef, sizeRef, viewport]);
+  }, [drawState, onDrawStatsRef, sceneRef, sizeRef, viewport]);
   const requestDraw = useRafCallback(draw);
 
   // Redraw whenever anything visual changes.

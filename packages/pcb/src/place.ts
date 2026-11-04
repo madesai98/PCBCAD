@@ -18,7 +18,7 @@
 import { footprintToBoard, pointInPolygon, rotate2, type Board, type ComponentInstance, type FootprintDef, type PartDef, type Side, type Vec2 } from '@pcbcad/core';
 import { IC_CATEGORIES } from './erc';
 import { bboxOf, distPtSeg2, mulberry32, nowMs, ringArea as ringAreaOf } from './geom';
-import { isGroundNet, stackLayers } from './model';
+import { isGroundNet } from './model';
 import { GridIndex } from './spatial';
 
 export type BoardEdge = 'left' | 'right' | 'top' | 'bottom';
@@ -63,6 +63,8 @@ interface PComp {
   area: number;
   /** Extra routing room kept around the courtyard while placing (mm per side). */
   halo: number;
+  /** Courtyard bbox at the pose it was last inserted with (board frame). */
+  box: Rect;
 }
 
 const ROTS = [0, 90, 180, 270];
@@ -119,7 +121,6 @@ class Placer {
 
   run(): void {
     const { board, parts } = this;
-    stackLayers(board);
     for (const c of board.components) {
       const part = parts[c.partId];
       const fp = part?.footprint;
@@ -270,6 +271,7 @@ class Placer {
       nets: [],
       area: (court.maxX - court.minX) * (court.maxY - court.minY),
       halo: 0,
+      box: { minX: 0, minY: 0, maxX: 0, maxY: 0 },
     };
   }
 
@@ -320,14 +322,16 @@ class Placer {
       if (!(cat === 'crystal' || cat === 'oscillator' || /^Y\d/i.test(x.c.ref))) continue;
       x.role = 'crystal';
       const xNets = new Set(Object.values(x.c.pinNets ?? {}).filter((n) => n && !isGnd(n)));
-      let best: { ic: PComp; pins: string[] } | null = null;
+      let best: { ic: PComp; pins: string[]; score: number } | null = null;
       for (const ic of this.comps) {
         if (ic === x || !(ic.role === 'ic' || (ic.part && IC_CATEGORIES.has(ic.part.category)))) continue;
         const pins = Object.entries(ic.c.pinNets ?? {})
           .filter(([, n]) => xNets.has(n))
-          .map(([pin]) => pin);
-        const score = pins.length * 10 + (ic.part?.category === 'mcu' ? 1 : 0);
-        if (pins.length && (!best || score > best.pins.length * 10)) best = { ic, pins };
+          .map(([pin]) => pin)
+          .sort((a, b) => xtalPinRank(ic, a) - xtalPinRank(ic, b));
+        // prefer the part with the most pins on the crystal nets, MCUs and XTAL-named pins first
+        const score = pins.length * 10 + (ic.part?.category === 'mcu' ? 2 : 0) + (pins.some((p) => xtalPinRank(ic, p) === 0) ? 1 : 0);
+        if (pins.length && (!best || score > best.score)) best = { ic, pins, score };
       }
       if (best) x.anchor = { ic: best.ic.i, pin: best.pins[0], capPin: best.pins[1] ?? best.pins[0] };
       // load caps
@@ -355,7 +359,6 @@ class Placer {
     const nx = this.rnx;
     const ny = this.rny;
     const bad = new Uint8Array(nx * ny).fill(1);
-    const half = rr / 2;
     const diag = rr * Math.SQRT1_2;
     // inside outline (cell centres)
     for (let j = 0; j < ny; j++) {
@@ -402,7 +405,6 @@ class Placer {
       const keep = Math.max(h.padDiameter ?? 0, h.drill * 1.9) / 2 + this.spacing;
       markNear([h.x, h.y], [h.x, h.y], keep + diag);
     }
-    void half;
     const sat = new Int32Array((nx + 1) * (ny + 1));
     for (let j = 0; j < ny; j++) {
       let row = 0;
@@ -414,12 +416,12 @@ class Placer {
     this.sat = sat;
   }
 
-  private rectInside(r: Rect): boolean {
+  private rectInside(minX: number, minY: number, maxX: number, maxY: number): boolean {
     const rr = this.rr;
-    const i0 = Math.floor((r.minX - this.rx0) / rr + 1e-9);
-    const i1 = Math.ceil((r.maxX - this.rx0) / rr - 1e-9) - 1;
-    const j0 = Math.floor((r.minY - this.ry0) / rr + 1e-9);
-    const j1 = Math.ceil((r.maxY - this.ry0) / rr - 1e-9) - 1;
+    const i0 = Math.floor((minX - this.rx0) / rr + 1e-9);
+    const i1 = Math.ceil((maxX - this.rx0) / rr - 1e-9) - 1;
+    const j0 = Math.floor((minY - this.ry0) / rr + 1e-9);
+    const j1 = Math.ceil((maxY - this.ry0) / rr - 1e-9) - 1;
     if (i0 < 0 || j0 < 0 || i1 >= this.rnx || j1 >= this.rny || i1 < i0 || j1 < j0) return false;
     const W = this.rnx + 1;
     const s = this.sat;
@@ -434,7 +436,7 @@ class Placer {
   }
 
   private inflated(pc: PComp, withHalo = true): Rect {
-    const r = this.rectAt(pc, pc.x, pc.y, pc.r);
+    const r = pc.box;
     const h = this.spacing / 2 + (withHalo ? pc.halo : 0);
     return { minX: r.minX - h, minY: r.minY - h, maxX: r.maxX + h, maxY: r.maxY + h };
   }
@@ -482,6 +484,7 @@ class Placer {
   }
 
   private insert(pc: PComp): void {
+    pc.box = this.rectAt(pc, pc.x, pc.y, pc.r);
     const r = this.inflated(pc);
     for (const ix of this.sidesOf(pc)) ix.insert(pc.i, r);
   }
@@ -493,25 +496,35 @@ class Placer {
 
   /** Legal pose? (inside allowed area, no overlap with placed parts on the same side; `ignore` excluded). */
   private legal(pc: PComp, x: number, y: number, r: number, ignore = -1): boolean {
-    const rect = this.rectAt(pc, x, y, r);
-    if (!pc.fixed && !this.rectInside(rect)) return false;
+    const o = pc.rect[r];
+    const minX = x + o.minX;
+    const minY = y + o.minY;
+    const maxX = x + o.maxX;
+    const maxY = y + o.maxY;
+    if (!pc.fixed && !this.rectInside(minX, minY, maxX, maxY)) return false;
     const h0 = this.spacing / 2;
     const h = h0 + pc.halo;
-    const q = { minX: rect.minX - h, minY: rect.minY - h, maxX: rect.maxX + h, maxY: rect.maxY + h };
-    for (const ix of this.sidesOf(pc)) {
-      const ids = ix.query(q, this.tmp);
-      for (const id of ids) {
+    const both = pc.bothSides;
+    const sides = both ? 2 : 1;
+    for (let s = 0; s < sides; s++) {
+      const ix = both ? (s === 0 ? this.idx.top : this.idx.bottom) : pc.side === 'bottom' ? this.idx.bottom : this.idx.top;
+      const ids = ix.queryBox(minX - h, minY - h, maxX + h, maxY + h, this.tmp);
+      for (let k = 0; k < ids.length; k++) {
+        const id = ids[k];
         if (id === pc.i || id === ignore) continue;
-        const o = this.comps[id];
-        if (!o.placed) continue;
-        if (this.tight(pc, o)) {
-          const a = { minX: rect.minX - h0, minY: rect.minY - h0, maxX: rect.maxX + h0, maxY: rect.maxY + h0 };
-          const b = this.inflated(o, false);
-          if (a.minX < b.maxX - 1e-9 && b.minX < a.maxX - 1e-9 && a.minY < b.maxY - 1e-9 && b.minY < a.maxY - 1e-9) return false;
-          continue;
+        const q = this.comps[id];
+        if (!q.placed) continue;
+        let ha: number;
+        let hb: number;
+        if (this.tight(pc, q)) {
+          ha = h0;
+          hb = h0;
+        } else {
+          ha = h;
+          hb = h0 + q.halo;
         }
-        const or = this.inflated(o);
-        if (q.minX < or.maxX - 1e-9 && or.minX < q.maxX - 1e-9 && q.minY < or.maxY - 1e-9 && or.minY < q.maxY - 1e-9) return false;
+        const b = q.box;
+        if (minX - ha < b.maxX + hb - 1e-9 && b.minX - hb < maxX + ha - 1e-9 && minY - ha < b.maxY + hb - 1e-9 && b.minY - hb < maxY + ha - 1e-9) return false;
       }
     }
     return true;
@@ -661,11 +674,24 @@ class Placer {
     let best: { x: number; y: number; r: number; cost: number } | null = null;
     const startRot = pc.r;
     const order = [startRot, (startRot + 1) % 4, (startRot + 2) % 4, (startRot + 3) % 4];
+    // rotations with identical courtyard boxes share one spiral search
+    const groups: number[][] = [];
     for (const r of order) {
-      const spot = this.findSpot(pc, desired, [r]);
+      const o = pc.rect[r];
+      const g = groups.find((gr) => {
+        const q = pc.rect[gr[0]];
+        return Math.abs(q.minX - o.minX) < 1e-9 && Math.abs(q.minY - o.minY) < 1e-9 && Math.abs(q.maxX - o.maxX) < 1e-9 && Math.abs(q.maxY - o.maxY) < 1e-9;
+      });
+      if (g) g.push(r);
+      else groups.push([r]);
+    }
+    for (const g of groups) {
+      const spot = this.findSpot(pc, desired, [g[0]]);
       if (!spot) continue;
-      const cost = this.compCost(pc, spot.x, spot.y, r) + 0.3 * spot.d;
-      if (!best || cost < best.cost - 1e-9) best = { x: spot.x, y: spot.y, r, cost };
+      for (const r of g) {
+        const cost = this.compCost(pc, spot.x, spot.y, r) + 0.3 * spot.d;
+        if (!best || cost < best.cost - 1e-9) best = { x: spot.x, y: spot.y, r, cost };
+      }
     }
     if (best) this.setPose(pc, best.x, best.y, best.r);
   }
@@ -862,7 +888,7 @@ class Placer {
   private anneal(): void {
     const movable = this.comps.filter((p) => p.placed && !p.fixed && p.role !== 'edge');
     if (movable.length < 2) return;
-    const budgetEnd = this.t0 + Math.min(1100, 200 + movable.length * 6);
+    const budgetEnd = this.t0 + Math.min(800, 150 + movable.length * 5);
     const rand = this.rand;
     const span = Math.max(this.bb.maxX - this.bb.minX, this.bb.maxY - this.bb.minY);
     const cx = (this.bb.minX + this.bb.maxX) / 2;
@@ -979,6 +1005,12 @@ class Placer {
     restore();
     return false;
   }
+}
+
+/** 0 for pins named like crystal pins (XTAL, XIN, XOUT, OSC, XI, XO, X1, X2), else 1. */
+function xtalPinRank(pc: PComp, pin: string): number {
+  const name = pc.part?.pins?.find((p) => p.number === pin)?.name ?? '';
+  return /^(XTAL|XIN|XOUT|OSC|XI|XO|X1|X2|XT)/i.test(name.replace(/[^A-Za-z0-9]/g, '')) ? 0 : 1;
 }
 
 function rotIndex(deg: number): number {

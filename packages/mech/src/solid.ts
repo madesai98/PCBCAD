@@ -276,9 +276,10 @@ export function compileSolid(s: Solid, parent?: Mat4): CNode | null {
     if (!bb) return null;
     return { leaf: false, op: 'intersection', children: ch, bb };
   }
-  const lb = localBBox(s);
+  const leaf = s as LeafSolid;
+  const lb = localBBox(leaf);
   if (!lb) return null;
-  return { leaf: true, s, inv: mat4Invert(m), bb: transformBBox(lb, m), test: makeTest(s) };
+  return { leaf: true, s: leaf, inv: mat4Invert(m), bb: transformBBox(lb, m), test: makeTest(leaf) };
 }
 
 export function bbUnion(bbs: BBox3[]): BBox3 {
@@ -383,6 +384,160 @@ function blit(dst: Uint8Array, dw: Win, src: Uint8Array, sw: Win, mode: 'or' | '
     }
 }
 
+/**
+ * Even-odd crossings of the local-XY line P(i) = (ax + i·bx, ay + i·by) with polygon `poly`;
+ * pushes sorted parameters i into `out` (returned length).
+ */
+function lineCrossings(poly: Vec2[], ax: number, ay: number, bx: number, by: number, out: number[]): number {
+  out.length = 0;
+  const nx = -by;
+  const ny = bx;
+  const l2 = bx * bx + by * by;
+  const n = poly.length;
+  let pa = poly[n - 1];
+  let sa = nx * (pa[0] - ax) + ny * (pa[1] - ay);
+  for (let e = 0; e < n; e++) {
+    const pb = poly[e];
+    const sb = nx * (pb[0] - ax) + ny * (pb[1] - ay);
+    if (sa > 0 !== sb > 0) {
+      const tau = sa / (sa - sb);
+      const cx = pa[0] + (pb[0] - pa[0]) * tau - ax;
+      const cy = pa[1] + (pb[1] - pa[1]) * tau - ay;
+      out.push((cx * bx + cy * by) / l2);
+    }
+    pa = pb;
+    sa = sb;
+  }
+  out.sort((p, q) => p - q);
+  return out.length;
+}
+
+/** Scanline rasterisation of a prism leaf (rows map to straight lines in the local frame). */
+function rasterPrism(node: CLeaf, g: GridSpec, w: Win, lw: Win, out: Uint8Array): void {
+  const s = node.s as PrismSolid;
+  const m = node.inv;
+  const h = g.h;
+  const [ox, oy, oz] = g.origin;
+  const ni = w.i1 - w.i0;
+  const nj = w.j1 - w.j0;
+  const bx = m[0] * h, by = m[4] * h, bz = m[8] * h;
+  const holes = (s.holes ?? []).filter((p) => p.length >= 3);
+  const width = lw.i1 - lw.i0;
+  const outerD = new Int32Array(width + 1);
+  const holeD = new Int32Array(width + 1);
+  const xs: number[] = [];
+  const x0 = ox + 0.5 * h;
+  const axisRow = Math.abs(bx) + Math.abs(by) < 1e-12 * h;
+  const mark = (d: Int32Array, sgn: number, lo: number, hi: number, t0: number, t1: number) => {
+    const a = Math.max(lo, Math.floor(t0) + 1);
+    const b = Math.min(hi, Math.ceil(t1));
+    if (a < b) {
+      d[a - lw.i0] += sgn;
+      d[b - lw.i0] -= sgn;
+    }
+  };
+  for (let k = lw.k0; k < lw.k1; k++) {
+    const z = oz + (k + 0.5) * h;
+    for (let j = lw.j0; j < lw.j1; j++) {
+      const y = oy + (j + 0.5) * h;
+      const ax = m[0] * x0 + m[1] * y + m[2] * z + m[3];
+      const ay = m[4] * x0 + m[5] * y + m[6] * z + m[7];
+      const az = m[8] * x0 + m[9] * y + m[10] * z + m[11];
+      // local z ∈ [z0, z1)
+      let lo = lw.i0;
+      let hi = lw.i1;
+      if (Math.abs(bz) < 1e-15) {
+        if (az < s.z0 || az >= s.z1) continue;
+      } else if (bz > 0) {
+        lo = Math.max(lo, Math.ceil((s.z0 - az) / bz));
+        hi = Math.min(hi, Math.ceil((s.z1 - az) / bz));
+      } else {
+        lo = Math.max(lo, Math.floor((s.z1 - az) / bz) + 1);
+        hi = Math.min(hi, Math.floor((s.z0 - az) / bz) + 1);
+      }
+      if (lo >= hi) continue;
+      const base = ni * ((j - w.j0) + nj * (k - w.k0)) - w.i0;
+      if (axisRow) {
+        if (node.test(ax, ay, s.z0)) for (let i = lo; i < hi; i++) out[base + i] = 1;
+        continue;
+      }
+      outerD.fill(0);
+      const nc = lineCrossings(s.outer, ax, ay, bx, by, xs);
+      if (!nc) continue;
+      for (let q = 0; q + 1 < nc; q += 2) mark(outerD, 1, lo, hi, xs[q], xs[q + 1]);
+      let anyHole = false;
+      if (holes.length) {
+        holeD.fill(0);
+        for (const hp of holes) {
+          const hc = lineCrossings(hp, ax, ay, bx, by, xs);
+          for (let q = 0; q + 1 < hc; q += 2) {
+            mark(holeD, 1, lo, hi, xs[q], xs[q + 1]);
+            anyHole = true;
+          }
+        }
+      }
+      let oc = 0;
+      let hcnt = 0;
+      for (let i = lo; i < hi; i++) {
+        oc += outerD[i - lw.i0];
+        if (anyHole) hcnt += holeD[i - lw.i0];
+        if (oc > 0 && hcnt <= 0) out[base + i] = 1;
+      }
+    }
+  }
+}
+
+/**
+ * Row fast path for rrloft leaves whose grid rows run along local ±X or ±Y at constant local z
+ * (shells placed with 90°-multiple rotations). Returns false when not applicable.
+ */
+function rasterRRLoft(node: CLeaf, g: GridSpec, w: Win, lw: Win, out: Uint8Array): boolean {
+  const s = node.s as RRLoftSolid;
+  const m = node.inv;
+  const h = g.h;
+  const bx = m[0] * h, by = m[4] * h, bz = m[8] * h;
+  const eps = 1e-12 * h;
+  const alongX = Math.abs(by) < eps && Math.abs(bx) > eps;
+  const alongY = Math.abs(bx) < eps && Math.abs(by) > eps;
+  if (Math.abs(bz) > eps || (!alongX && !alongY)) return false;
+  const [ox, oy, oz] = g.origin;
+  const ni = w.i1 - w.i0;
+  const nj = w.j1 - w.j0;
+  const x0 = ox + 0.5 * h;
+  for (let k = lw.k0; k < lw.k1; k++) {
+    const z = oz + (k + 0.5) * h;
+    for (let j = lw.j0; j < lw.j1; j++) {
+      const y = oy + (j + 0.5) * h;
+      const ax = m[0] * x0 + m[1] * y + m[2] * z + m[3];
+      const ay = m[4] * x0 + m[5] * y + m[6] * z + m[7];
+      const az = m[8] * x0 + m[9] * y + m[10] * z + m[11];
+      if (az < s.z0 || az >= s.z1) continue;
+      const inset = rrloftInset(s, az);
+      const hx = s.hx - inset;
+      const hy = s.hy - inset;
+      if (hx <= 0 || hy <= 0) continue;
+      const r = Math.max(0, Math.min(s.r - inset, hx, hy));
+      // fixed coordinate c across the row, half-extent along the row
+      const c = alongX ? Math.abs(ay) : Math.abs(ax);
+      const hAlong = alongX ? hx : hy;
+      const hAcross = alongX ? hy : hx;
+      if (c > hAcross) continue;
+      const dc = c - (hAcross - r);
+      const half = dc <= 0 ? hAlong : hAlong - r + Math.sqrt(Math.max(0, r * r - dc * dc));
+      const a0 = alongX ? ax : ay;
+      const b = alongX ? bx : by;
+      let t0 = (-half - a0) / b;
+      let t1 = (half - a0) / b;
+      if (t0 > t1) [t0, t1] = [t1, t0];
+      const lo = Math.max(lw.i0, Math.ceil(t0));
+      const hi = Math.min(lw.i1 - 1, Math.floor(t1));
+      const base = ni * ((j - w.j0) + nj * (k - w.k0)) - w.i0;
+      for (let i = lo; i <= hi; i++) out[base + i] = 1;
+    }
+  }
+  return true;
+}
+
 function rasterNode(node: CNode, g: GridSpec, w: Win): Uint8Array {
   const out = new Uint8Array(winSize(w));
   const ni = w.i1 - w.i0;
@@ -390,6 +545,11 @@ function rasterNode(node: CNode, g: GridSpec, w: Win): Uint8Array {
   if (node.leaf) {
     const lw = winInter(w, bbWin(node.bb, g));
     if (!lw) return out;
+    if (node.s.kind === 'prism') {
+      rasterPrism(node, g, w, lw, out);
+      return out;
+    }
+    if (node.s.kind === 'rrloft' && rasterRRLoft(node, g, w, lw, out)) return out;
     const m = node.inv;
     const [ox, oy, oz] = g.origin;
     const h = g.h;

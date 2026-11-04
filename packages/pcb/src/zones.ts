@@ -12,7 +12,7 @@
  * Result rings are stored in zone.fill: outer rings CCW, holes CW (even-odd semantics).
  */
 import { rotate2, type Board, type PartDef, type Vec2, type Zone } from '@pcbcad/core';
-import { ARC_TOL, areaOf, ccw, difference, fromIPath, intersection, islands, offsetPaths, primPaths, toIPath, union, type IPath, type IPaths } from './clip';
+import { ARC_TOL, SCALE, areaOf, boundsOf, ccw, difference, fromIPath, intersection, islands, offsetPaths, openPaths, primPaths, toIPath, union, type IPath, type IPaths } from './clip';
 import { bbInflate, makePrim, type Prim } from './geom';
 import { collectPads, holeCopperPrim, layerBit, netTraceWidth, stackLayers, tracePrims, viaMask, type PadInfo } from './model';
 import { Region } from './region';
@@ -64,6 +64,9 @@ export function fillZonesInPlace(board: Board, parts: Record<string, PartDef>, o
   }
 }
 
+/** Arc tolerance used for pour obstacles (mm): coarser than the default, still conservative. */
+const FILL_TOL = 0.004;
+
 function fillOne(
   board: Board,
   z: Zone,
@@ -81,51 +84,59 @@ function fillOne(
   if (z.outline && z.outline.length >= 3) base = intersection([ccw(toIPath(z.outline))], area);
   if (!base.length) return [];
 
+  // other-net copper (and holes) inflated by the clearance; kept per object for local spoke clipping
   const obstacles: IPaths = [];
   const samePads: PadInfo[] = [];
   const sameCopper: Prim[] = [];
+  const addObstacle = (pr: Prim) => {
+    for (const q of primPaths(pr, clr, FILL_TOL)) obstacles.push(q);
+  };
   for (const p of pads) {
     if (p.prim && p.layers & bit) {
       if (net && p.netId === net) {
         samePads.push(p);
         sameCopper.push(p.prim);
-      } else obstacles.push(...primPaths(p.prim, clr));
-    } else if (!p.prim && p.hole) obstacles.push(...primPaths(p.hole, clr));
+      } else addObstacle(p.prim);
+    } else if (!p.prim && p.hole) addObstacle(p.hole);
   }
   for (const t of board.traces ?? []) {
     if (layerBit(stack, t.layer) !== bit) continue;
     const prims = tracePrims(t);
     if (net && t.netId === net) sameCopper.push(...prims);
-    else for (const pr of prims) obstacles.push(...primPaths(pr, clr));
+    else for (const pr of prims) addObstacle(pr);
   }
   for (const v of board.vias ?? []) {
     if (!(viaMask(stack, v) & bit)) continue;
     const pr = makePrim([[v.x, v.y]], Math.max(v.diameter, v.drill) / 2);
     if (net && v.netId === net) sameCopper.push(pr);
-    else obstacles.push(...primPaths(pr, clr));
+    else addObstacle(pr);
   }
   for (const h of board.holes ?? []) {
     const cu = holeCopperPrim(h);
     if (cu && net && h.netId === net) sameCopper.push(cu);
-    else obstacles.push(...primPaths(cu ?? makePrim([[h.x, h.y]], h.drill / 2), clr));
+    else addObstacle(cu ?? makePrim([[h.x, h.y]], h.drill / 2));
   }
   for (const d of done) {
     if (d.z.layer !== z.layer || (net && d.z.netId === net) || !d.paths.length) continue;
-    obstacles.push(...offsetPaths(d.paths, clr));
+    obstacles.push(...offsetPaths(d.paths, clr, true, FILL_TOL));
   }
   const obstacleUnion = union(obstacles);
   let fill = difference(base, obstacleUnion);
   const thermal = z.thermalRelief === true;
-  if (thermal && samePads.length) fill = difference(fill, union(samePads.flatMap((p) => primPaths(p.prim!, clr))));
+  if (thermal && samePads.length) fill = difference(fill, union(samePads.flatMap((p) => primPaths(p.prim!, clr, FILL_TOL))));
 
   const mw = z.minWidth ?? defaultMinWidth;
-  if (mw > 0 && fill.length) {
-    const opened = offsetPaths(offsetPaths(fill, -mw / 2), mw / 2);
-    fill = intersection(opened, fill);
-  }
+  if (mw > 0 && fill.length) fill = openPaths(fill, mw / 2);
 
   if (thermal && samePads.length && fill.length) {
     const sw = Math.max(0.3, netTraceWidth(board, net));
+    const obsIdx = indexPaths(obstacles);
+    const fillIdx = indexPaths(fill);
+    const tmp: number[] = [];
+    const near = (idx: ReturnType<typeof indexPaths>, q: IPath) => {
+      const b = boundsOf([q]);
+      return idx.index.queryBox(b.left / SCALE, b.bottom / SCALE, b.right / SCALE, b.top / SCALE, tmp).map((i) => idx.paths[i]);
+    };
     const spokes: IPaths = [];
     for (const p of samePads) {
       const prim = p.prim!;
@@ -134,10 +145,13 @@ function fillOne(
         const ext = halfExtent(prim, [p.pp.x, p.pp.y], u);
         const reach = ext + clr + Math.max(mw, sw / 2) + 0.05;
         const spoke = rectAlong([p.pp.x, p.pp.y], u, 0, reach, sw);
-        const clipped = difference(intersection([spoke], base), obstacleUnion);
+        const clipped = difference(intersection([spoke], base), near(obsIdx, spoke));
         if (!clipped.length) continue;
+        // keep only spokes whose outer end lands on the (opened) fill
         const tip = rectAlong([p.pp.x, p.pp.y], u, ext + clr, reach, sw);
-        if (areaOf(intersection([tip], fill)) < sw * Math.max(mw, 0.05) * 0.25) continue;
+        const rings = near(fillIdx, tip);
+        const lands = [ext + clr + Math.min(mw, sw) / 2 + 0.01, reach - 0.02].some((d) => insideEvenOdd(rings, p.pp.x + u[0] * d, p.pp.y + u[1] * d));
+        if (!lands) continue;
         spokes.push(...clipped);
       }
     }
@@ -167,6 +181,32 @@ function fillOne(
     out.push(island.outer, ...island.holes);
   }
   return out;
+}
+
+/** Even-odd point test against integer rings (fill semantics: outer + holes). */
+function insideEvenOdd(rings: IPaths, x: number, y: number): boolean {
+  const X = x * SCALE;
+  const Y = y * SCALE;
+  let inside = false;
+  for (const r of rings) {
+    for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+      const yi = r[i].Y;
+      const yj = r[j].Y;
+      if (yi > Y !== yj > Y && X < ((r[j].X - r[i].X) * (Y - yi)) / (yj - yi) + r[i].X) inside = !inside;
+    }
+  }
+  return inside;
+}
+
+/** Spatial index over integer paths (bbox in mm). */
+function indexPaths(paths: IPaths): { index: GridIndex; paths: IPaths } {
+  const b = boundsOf(paths);
+  const index = new GridIndex({ minX: b.left / SCALE, minY: b.bottom / SCALE, maxX: b.right / SCALE, maxY: b.top / SCALE }, 2, paths.length);
+  paths.forEach((p, i) => {
+    const q = boundsOf([p]);
+    index.insert(i, { minX: q.left / SCALE, minY: q.bottom / SCALE, maxX: q.right / SCALE, maxY: q.top / SCALE });
+  });
+  return { index, paths };
 }
 
 function buildIndex(prims: Prim[]): { idx: GridIndex } {

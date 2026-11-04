@@ -66,7 +66,8 @@ export function analyzeConnectivity(board: Board, parts: Record<string, PartDef>
       for (let k = i + 1; k < zones.length; k++) {
         const a = zones[i];
         const b = zones[k];
-        if (a.netId !== b.netId || (a.layers & b.layers) === 0 || uf.find(a.id) === uf.find(b.id)) continue;
+        // islands of one zone are disjoint by construction
+        if (a.zone === b.zone || a.netId !== b.netId || (a.layers & b.layers) === 0 || uf.find(a.id) === uf.find(b.id)) continue;
         if (a.region!.gapToRegion(b.region!, TOUCH_TOL) <= TOUCH_TOL) uf.union(a.id, b.id);
       }
     }

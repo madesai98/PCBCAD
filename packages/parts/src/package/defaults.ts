@@ -135,11 +135,11 @@ export function quadNoLeadPitch(pins: number, body: number): number {
 
 /** Pitch for a dual no-lead package (DFN/SON) with pins/2 terminals along a side of length `len`. */
 export function dualNoLeadPitch(pins: number, len: number): number {
-  const table: Record<string, number> = { '6x2': 0.65, '8x2': 0.5, '6x3': 0.95, '8x3': 0.65, '10x3': 0.5, '12x3': 0.45, '14x3': 0.4, '8x4': 0.8, '10x4': 0.8, '8x5': 1.27, '8x6': 1.27, '8x3.3': 0.65 };
+  const table: Record<string, number> = { '6x2': 0.65, '8x2': 0.5, '6x3': 0.95, '8x2.5': 0.65, '8x3': 0.65, '10x3': 0.5, '12x3': 0.45, '14x3': 0.4, '8x4': 0.8, '10x4': 0.8, '8x5': 1.27, '8x6': 1.27, '8x3.3': 0.65 };
   const key = `${pins}x${rnd(len, 1)}`;
   if (table[key]) return table[key];
   const n = Math.ceil(pins / 2);
-  for (const p of STD_PITCHES) if ((n - 1) * p <= len - 0.6 + 1e-6) return p;
+  for (const p of STD_PITCHES) if ((n - 1) * p <= len - 0.5 + 1e-6) return p;
   return 0.35;
 }
 

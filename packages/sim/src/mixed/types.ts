@@ -214,9 +214,9 @@ export interface MixedSignalOptions {
   /** Extra behaviour scripts (override project.behaviors and built-ins with the same id). */
   behaviors?: BehaviorScript[];
   /**
-   * Script sandbox. Built-in scripts run in `createFunctionSandbox()` when omitted; any other
-   * script REQUIRES a sandbox (pass `createNodeSandbox()` on the server, or explicitly
-   * `createFunctionSandbox()` to run trusted code unisolated).
+   * Script sandbox for agent/user scripts (pass `createNodeSandbox()` on the server, or explicitly
+   * `createFunctionSandbox()` to run trusted code unisolated). Unmodified built-in scripts always
+   * run in-process. Instances are disposed at the end of the run; the caller owns the sandbox.
    */
   sandbox?: ScriptSandbox;
   /** 'quasi-static' (default): event-driven DC solves; 'transient': steps the transient solver. */

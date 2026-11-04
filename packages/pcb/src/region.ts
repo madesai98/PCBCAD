@@ -27,11 +27,36 @@ export class Region {
     return a;
   }
 
-  /** True when the point lies in the filled area. */
+  /** Number of boundary edges. */
+  edgeCount(): number {
+    let n = 0;
+    for (const r of this.rings) n += r.length;
+    return n;
+  }
+
+  /** True when the point lies in the filled area (even-odd). Uses the edge index for large regions. */
   contains(x: number, y: number): boolean {
     if (x < this.bb.minX || x > this.bb.maxX || y < this.bb.minY || y > this.bb.maxY) return false;
+    if (!this.edges) this.build();
+    if (!this.index) {
+      let inside = false;
+      for (const r of this.rings) if (pointInRing(x, y, r)) inside = !inside;
+      return inside;
+    }
+    // cast a ray to +x and count crossings of the edges stored in the buckets along it
+    const e = this.edges!;
+    const ids = this.index.queryBox(x, y, this.bb.maxX, y, this.tmp);
     let inside = false;
-    for (const r of this.rings) if (pointInRing(x, y, r)) inside = !inside;
+    for (let k = 0; k < ids.length; k++) {
+      const i = ids[k] * 4;
+      const ay = e[i + 1];
+      const by = e[i + 3];
+      if (ay > y !== by > y) {
+        const ax = e[i];
+        const bx = e[i + 2];
+        if (x < ((bx - ax) * (y - ay)) / (by - ay) + ax) inside = !inside;
+      }
+    }
     return inside;
   }
 
@@ -120,6 +145,8 @@ export class Region {
   /** Gap between two regions (≤ 0 = overlap), Infinity if larger than maxGap. */
   gapToRegion(o: Region, maxGap: number, at?: Vec2): number {
     if (!bbOverlaps(this.bb, o.bb, maxGap)) return Infinity;
+    // walk the edges of the smaller region against the (indexed) larger one
+    if (this.edgeCount() > o.edgeCount()) return o.gapToRegion(this, maxGap, at);
     const a0 = this.rings[0][0];
     if (o.contains(a0[0], a0[1])) {
       if (at) {

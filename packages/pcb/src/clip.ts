@@ -37,13 +37,13 @@ export function areaOf(paths: IPaths): number {
   return a;
 }
 
-function segmentsFor(R: number): number {
-  return Math.max(8, Math.min(256, Math.ceil(Math.PI / Math.acos(Math.max(-1, 1 - ARC_TOL / Math.max(R, 1e-6))))));
+function segmentsFor(R: number, tol: number): number {
+  return Math.max(8, Math.min(256, Math.ceil(Math.PI / Math.acos(Math.max(-1, 1 - tol / Math.max(R, 1e-6))))));
 }
 
-/** Circle polygon containing the true circle (CCW). */
-export function circlePath(cx: number, cy: number, r: number): IPath {
-  const n = segmentsFor(r);
+/** Circle polygon containing the true circle (CCW, circumscribed, max outward error `tol`). */
+export function circlePath(cx: number, cy: number, r: number, tol = ARC_TOL): IPath {
+  const n = segmentsFor(r, tol);
   const rc = r / Math.cos(Math.PI / n);
   const out: IPath = [];
   for (let i = 0; i < n; i++) {
@@ -53,26 +53,24 @@ export function circlePath(cx: number, cy: number, r: number): IPath {
   return out;
 }
 
-/** Capsule (segment a-b with radius r) polygon containing the true capsule (CCW). */
-export function capsulePath(a: Vec2, b: Vec2, r: number): IPath {
+/** Capsule (segment a-b with radius r) polygon containing the true capsule (CCW, circumscribed). */
+export function capsulePath(a: Vec2, b: Vec2, r: number, tol = ARC_TOL): IPath {
   const dx = b[0] - a[0];
   const dy = b[1] - a[1];
   const len = Math.hypot(dx, dy);
-  if (len < 1e-9) return circlePath(a[0], a[1], r);
+  if (len < 1e-9) return circlePath(a[0], a[1], r, tol);
   const base = Math.atan2(dy, dx);
-  const n = Math.max(4, Math.ceil(segmentsFor(r) / 2));
+  const n = Math.max(4, Math.ceil(segmentsFor(r, tol) / 2));
+  // every vertex on the circumscribed radius: arcs and straight sides both contain the true capsule
   const rc = r / Math.cos(Math.PI / (2 * n));
   const out: IPath = [];
-  // around b: from base-90° to base+90°
   for (let i = 0; i <= n; i++) {
     const t = base - Math.PI / 2 + (Math.PI * i) / n;
-    const rr = i === 0 || i === n ? r : rc;
-    out.push({ X: Math.round((b[0] + rr * Math.cos(t)) * SCALE), Y: Math.round((b[1] + rr * Math.sin(t)) * SCALE) });
+    out.push({ X: Math.round((b[0] + rc * Math.cos(t)) * SCALE), Y: Math.round((b[1] + rc * Math.sin(t)) * SCALE) });
   }
   for (let i = 0; i <= n; i++) {
     const t = base + Math.PI / 2 + (Math.PI * i) / n;
-    const rr = i === 0 || i === n ? r : rc;
-    out.push({ X: Math.round((a[0] + rr * Math.cos(t)) * SCALE), Y: Math.round((a[1] + rr * Math.sin(t)) * SCALE) });
+    out.push({ X: Math.round((a[0] + rc * Math.cos(t)) * SCALE), Y: Math.round((a[1] + rc * Math.sin(t)) * SCALE) });
   }
   return out;
 }
@@ -82,26 +80,88 @@ export function ccw(p: IPath): IPath {
   return Clipper.Area(p) < 0 ? p.slice().reverse() : p;
 }
 
-/** Offset closed paths by delta (mm); round joins; conservative for positive deltas. */
-export function offsetPaths(paths: IPaths, delta: number): IPaths {
+/**
+ * Offset closed paths by delta (mm) with round joins. With `conservative` (default) a positive offset
+ * is enlarged by the arc tolerance so the result contains the true offset; otherwise round joins are
+ * inscribed (result inside the true offset).
+ */
+export function offsetPaths(paths: IPaths, delta: number, conservative = true, tol = ARC_TOL): IPaths {
   if (!paths.length) return [];
   if (Math.abs(delta) < 1e-9) return paths;
-  const co = new ClipperOffset(2, ARC_TOL * SCALE * 0.5);
+  const co = new ClipperOffset(2, tol * SCALE * 0.5);
   co.AddPaths(paths, JoinType.jtRound, EndType.etClosedPolygon);
   const out: IPaths = [];
-  co.Execute(out, (delta + (delta > 0 ? ARC_TOL : 0)) * SCALE);
+  co.Execute(out, (delta + (delta > 0 && conservative ? tol : 0)) * SCALE);
   return out;
 }
 
 /** Polygon(s) containing the prim inflated by `inflate` (mm). */
-export function primPaths(p: Prim, inflate = 0): IPaths {
+export function primPaths(p: Prim, inflate = 0, tol = ARC_TOL): IPaths {
   const R = p.r + inflate;
   const pts = p.pts;
-  if (pts.length === 1) return R > 1e-9 ? [circlePath(pts[0][0], pts[0][1], R)] : [];
-  if (pts.length === 2) return R > 1e-9 ? [capsulePath(pts[0], pts[1], R)] : [];
+  if (pts.length === 1) return R > 1e-9 ? [circlePath(pts[0][0], pts[0][1], R, tol)] : [];
+  if (pts.length === 2) return R > 1e-9 ? [capsulePath(pts[0], pts[1], R, tol)] : [];
   const poly = ccw(toIPath(pts));
   if (R <= 1e-9) return [poly];
-  return offsetPaths([poly], R);
+  return offsetPaths([poly], R, true, tol);
+}
+
+/** Integer bounds of paths. */
+export function boundsOf(paths: IPaths): { left: number; bottom: number; right: number; top: number } {
+  let left = Infinity;
+  let bottom = Infinity;
+  let right = -Infinity;
+  let top = -Infinity;
+  for (const p of paths)
+    for (const q of p) {
+      if (q.X < left) left = q.X;
+      if (q.X > right) right = q.X;
+      if (q.Y < bottom) bottom = q.Y;
+      if (q.Y > top) top = q.Y;
+    }
+  return { left, bottom, right, top };
+}
+
+function rectPath(x0: number, y0: number, x1: number, y1: number): IPath {
+  return [
+    { X: x0, Y: y0 },
+    { X: x1, Y: y0 },
+    { X: x1, Y: y1 },
+    { X: x0, Y: y1 },
+  ];
+}
+
+/**
+ * Morphological opening (erode by r, then dilate by r) — removes copper narrower than 2r. The result is
+ * always inside the input (erosion is over-estimated by the arc tolerance, dilation uses inscribed
+ * arcs). The dilation runs in vertical strips with r-wide overlaps, which is exact and keeps
+ * clipper's sweep line short on large boards.
+ */
+export function openPaths(paths: IPaths, r: number): IPaths {
+  if (r <= 0 || !paths.length) return paths;
+  const eroded = offsetPaths(paths, -(r + ARC_TOL));
+  if (!eroded.length) return [];
+  let verts = 0;
+  for (const p of eroded) verts += p.length;
+  const strips = Math.max(1, Math.min(48, Math.ceil(verts / 1500)));
+  if (strips === 1) return offsetPaths(eroded, r, false);
+  const b = boundsOf(eroded);
+  const R = Math.ceil(r * SCALE) + 2;
+  const lo = b.left - R;
+  const hi = b.right + R;
+  const ringBounds = eroded.map((p) => boundsOf([p]));
+  const pieces: IPaths = [];
+  for (let k = 0; k < strips; k++) {
+    const x0 = Math.round(lo + ((hi - lo) * k) / strips);
+    const x1 = Math.round(lo + ((hi - lo) * (k + 1)) / strips);
+    // rings that cannot reach the strip window do not influence it (holes are local)
+    const local = eroded.filter((_, i) => ringBounds[i].right >= x0 - R && ringBounds[i].left <= x1 + R);
+    if (!local.length) continue;
+    const part = intersection(local, [rectPath(x0 - R, b.bottom - R, x1 + R, b.top + R)]);
+    if (!part.length) continue;
+    pieces.push(...intersection(offsetPaths(part, r, false), [rectPath(x0, b.bottom - 2 * R, x1, b.top + 2 * R)]));
+  }
+  return union(pieces);
 }
 
 function exec(type: ClipTypeT, subj: IPaths, clip: IPaths): IPaths {

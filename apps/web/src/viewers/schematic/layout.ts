@@ -158,10 +158,12 @@ function makeProto(comp: ComponentInstance, part: PartDef | undefined, geom: Sym
   let ref: PlacedSymbol['ref'];
   let val: PlacedSymbol['value'];
   if (geom.kind === 'box' || geom.kind === 'connector') {
-    ref = { x: body.x0 + (geom.kind === 'box' ? G : 0), y: body.y0 + (pins.some((p) => p.wdir === 'up') ? G : 0) - 1.0, anchor: 'start' };
-    val = { x: body.x0 + (geom.kind === 'box' ? G : 0), y: body.y1 - (pins.some((p) => p.wdir === 'down') ? G : 0) + 2.1, anchor: 'start', text: value };
-    full = union(full, { x0: ref.x, y0: ref.y - REF_SIZE, x1: ref.x + refW, y1: ref.y });
-    full = union(full, { x0: val.x, y0: val.y - VALUE_SIZE, x1: val.x + valW, y1: val.y });
+    // Reference + value stacked above the body's top-left corner (top pins are packed to the right).
+    const bx0 = body.x0 + (pins.some((p) => p.wdir === 'left') ? G : 0);
+    const by0 = body.y0 + (pins.some((p) => p.wdir === 'up') ? G : 0);
+    ref = { x: bx0, y: by0 - 2.75, anchor: 'start' };
+    val = { x: bx0, y: by0 - 0.8, anchor: 'start', text: value };
+    full = union(full, { x0: bx0, y0: ref.y - REF_SIZE, x1: bx0 + Math.max(refW, valW), y1: by0 });
   } else {
     const tall = body.y1 - body.y0 >= body.x1 - body.x0;
     if (tall) {
@@ -170,10 +172,12 @@ function makeProto(comp: ComponentInstance, part: PartDef | undefined, geom: Sym
       val = { x, y: 1.55, anchor: 'start', text: value };
       full = union(full, { x0: x, y0: -0.35 - REF_SIZE, x1: x + Math.max(refW, valW), y1: 1.6 });
     } else {
+      // Horizontal: reference above, value below everything that hangs under the body.
+      const below = Math.max(body.y1, ...terms.filter((t) => t.box.x1 > -valW / 2 && t.box.x0 < valW / 2 && t.box.y0 >= -0.01).map((t) => t.box.y1));
       ref = { x: 0, y: body.y0 - 0.8, anchor: 'middle' };
-      val = { x: 0, y: body.y1 + 2.0, anchor: 'middle', text: value };
+      val = { x: 0, y: below + 1.9, anchor: 'middle', text: value };
       full = union(full, { x0: -refW / 2, y0: body.y0 - 0.8 - REF_SIZE, x1: refW / 2, y1: body.y0 });
-      full = union(full, { x0: -valW / 2, y0: body.y1, x1: valW / 2, y1: body.y1 + 2.1 });
+      full = union(full, { x0: -valW / 2, y0: below, x1: valW / 2, y1: below + 2.1 });
     }
   }
   return { comp, part, geom, rot, full, body, pins, terms, ref, value: val };
@@ -337,10 +341,33 @@ function autoLayout(comps: ComponentInstance[], parts: Record<string, PartDef>, 
       }
     if (best) attach.set(s.comp.id, { hub: best.hub, side: sideOf(best.pin.wdir), key: best.pin.wy + best.pin.wx * 0.001 });
   }
+  // Chains (LED behind its resistor, gate driver behind its series resistor…).
+  const chainPass = () => {
+    for (let pass = 0; pass < 6; pass++) {
+      let changed = false;
+      for (const s of satComps) {
+        if (attach.has(s.comp.id)) continue;
+        const sig = Object.values(s.comp.pinNets).filter((n) => !isRail(n));
+        for (const o of satComps) {
+          const a = attach.get(o.comp.id);
+          if (!a || o === s) continue;
+          if (Object.values(o.comp.pinNets).some((n) => sig.includes(n))) {
+            attach.set(s.comp.id, { hub: a.hub, side: a.side, key: a.key + 0.01 });
+            changed = true;
+            break;
+          }
+        }
+      }
+      if (!changed) break;
+    }
+  };
+  chainPass();
   // Decoupling / rail-only parts: nearest hub (by board placement) sharing a rail; ICs preferred.
   for (const s of satComps) {
     if (attach.has(s.comp.id)) continue;
-    const rails = [...new Set(Object.values(s.comp.pinNets).filter((n) => ctx.netClass(n) === 'power'))];
+    const allNets = Object.values(s.comp.pinNets);
+    const railOnly = allNets.every((n) => isRail(n));
+    const rails = [...new Set(allNets.filter((n) => ctx.netClass(n) === 'power'))];
     let best: { hub: number; d: number; conn: number; pin: PlacedPin } | null = null;
     for (const n of rails)
       for (const hp of hubPinsOnNet.get(n) ?? []) {
@@ -350,28 +377,11 @@ function autoLayout(comps: ComponentInstance[], parts: Record<string, PartDef>, 
       }
     if (best) {
       const h = hubs[best.hub];
-      const side: Side = h.geom.kind === 'connector' ? sideOf(best.pin.wdir) : 'top';
-      attach.set(s.comp.id, { hub: best.hub, side, key: side === 'top' ? best.pin.wx : best.pin.wy });
+      const side: Side = h.geom.kind === 'connector' ? sideOf(best.pin.wdir) : railOnly ? 'top' : 'bottom';
+      attach.set(s.comp.id, { hub: best.hub, side, key: side === 'top' || side === 'bottom' ? best.pin.wx : best.pin.wy });
     }
   }
-  // Chains (LED behind its resistor, gate driver behind its series resistor…).
-  for (let pass = 0; pass < 4; pass++) {
-    let changed = false;
-    for (const s of satComps) {
-      if (attach.has(s.comp.id)) continue;
-      const sig = Object.values(s.comp.pinNets).filter((n) => !isRail(n));
-      for (const o of satComps) {
-        const a = attach.get(o.comp.id);
-        if (!a || o === s) continue;
-        if (Object.values(o.comp.pinNets).some((n) => sig.includes(n))) {
-          attach.set(s.comp.id, { hub: a.hub, side: a.side, key: a.key + 0.01 });
-          changed = true;
-          break;
-        }
-      }
-    }
-    if (!changed) break;
-  }
+  chainPass();
 
   /* Satellite prototypes with orientation rules. */
   const sats: Sat[] = [];
@@ -466,39 +476,39 @@ function autoLayout(comps: ComponentInstance[], parts: Record<string, PartDef>, 
     clusters.push({ items: packed.items, box: packed.box, column: 5 });
   }
 
-  /* Columns. */
+  /* Columns: semantic order (entry → power → core → peripherals → outputs → misc); short neighbouring
+     columns are stacked so the sheet stays compact, tall ones are split. */
   const colIds = [...new Set(clusters.map((c) => c.column))].sort((a, b) => a - b);
-  const totalArea = clusters.reduce((s, c) => s + (c.box.x1 - c.box.x0) * (c.box.y1 - c.box.y0), 0);
-  const maxColH = Math.max(150, Math.sqrt(totalArea) * 1.25, ...clusters.map((c) => c.box.y1 - c.box.y0));
+  const VGAP = 3 * G;
+  const hOf = (c: Cluster) => c.box.y1 - c.box.y0;
+  const stackH = (list: Cluster[]) => list.reduce((s2, c) => s2 + hOf(c), 0) + VGAP * Math.max(0, list.length - 1);
+  const totalArea = clusters.reduce((s2, c) => s2 + (c.box.x1 - c.box.x0) * hOf(c), 0);
+  const semantic = colIds.map((col) => clusters.filter((c) => c.column === col));
+  const tallest = Math.max(...semantic.map(stackH), ...clusters.map(hOf));
+  const limit = Math.max(Math.min(tallest, Math.sqrt(totalArea / 0.55 / 1.5) * 1.15), Math.max(...clusters.map(hOf)), 90);
+  const columns: Cluster[][] = [];
+  for (const sem of semantic) {
+    for (const c of sem) {
+      const cur = columns[columns.length - 1];
+      if (cur && stackH([...cur, c]) <= limit && (cur.length === 0 || cur[cur.length - 1].column === c.column || stackH(sem) + stackH(cur) <= limit)) cur.push(c);
+      else columns.push([c]);
+    }
+  }
+  const maxStack = Math.max(...columns.map(stackH));
   const out: Item[] = [];
   let cx = 0;
   let all = EMPTY;
-  for (const col of colIds) {
-    const list = clusters.filter((c) => c.column === col);
-    // Split overly tall columns.
-    const groups: Cluster[][] = [[]];
-    let hAcc = 0;
-    for (const c of list) {
-      const h = c.box.y1 - c.box.y0;
-      if (groups[groups.length - 1].length && hAcc + h > maxColH) {
-        groups.push([]);
-        hAcc = 0;
-      }
-      groups[groups.length - 1].push(c);
-      hAcc += h + 3 * G;
+  for (const g of columns) {
+    const colW = Math.max(...g.map((c) => c.box.x1 - c.box.x0));
+    let cy = (maxStack - stackH(g)) / 2;
+    for (const c of g) {
+      const dx = snap(cx - c.box.x0 + (colW - (c.box.x1 - c.box.x0)) / 2);
+      const dy = snap(cy - c.box.y0);
+      for (const it of c.items) out.push({ proto: it.proto, x: it.x + dx, y: it.y + dy });
+      all = union(all, shift(c.box, dx, dy));
+      cy += hOf(c) + VGAP;
     }
-    for (const g of groups) {
-      const colW = Math.max(...g.map((c) => c.box.x1 - c.box.x0));
-      let cy = 0;
-      for (const c of g) {
-        const dx = snap(cx - c.box.x0 + (colW - (c.box.x1 - c.box.x0)) / 2);
-        const dy = snap(cy - c.box.y0);
-        for (const it of c.items) out.push({ proto: it.proto, x: it.x + dx, y: it.y + dy });
-        all = union(all, shift(c.box, dx, dy));
-        cy += c.box.y1 - c.box.y0 + 3 * G;
-      }
-      cx += colW + 4 * G;
-    }
+    cx += colW + 4 * G;
   }
   return { items: out, box: Number.isFinite(all.x0) ? all : { x0: 0, y0: 0, x1: 10, y1: 10 } };
 }

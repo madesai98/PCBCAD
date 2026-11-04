@@ -82,6 +82,11 @@ export class GridIndex {
 
   /** Unique ids whose buckets intersect `bb` (a superset of the true overlaps). */
   query(bb: BBox2, out: number[] = []): number[] {
+    return this.queryBox(bb.minX, bb.minY, bb.maxX, bb.maxY, out);
+  }
+
+  /** {@link query} with scalar bounds (no allocation). */
+  queryBox(minX: number, minY: number, maxX: number, maxY: number, out: number[] = []): number[] {
     out.length = 0;
     this.cur++;
     if (this.cur === 0xffffffff) {
@@ -90,10 +95,10 @@ export class GridIndex {
     }
     const cur = this.cur;
     const stamp = this.stamp;
-    const i0 = this.ix(bb.minX);
-    const i1 = this.ix(bb.maxX);
-    const j0 = this.iy(bb.minY);
-    const j1 = this.iy(bb.maxY);
+    const i0 = this.ix(minX);
+    const i1 = this.ix(maxX);
+    const j0 = this.iy(minY);
+    const j1 = this.iy(maxY);
     for (let j = j0; j <= j1; j++) {
       for (let i = i0; i <= i1; i++) {
         const c = this.cells[j * this.nx + i];

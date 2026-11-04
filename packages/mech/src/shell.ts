@@ -233,24 +233,7 @@ export function bossGeom(g: ShellGeom, b: ShellBoss, spec?: FastenerSpec): BossG
   const z1 = g.t + height;
   let cb: BossGeom['cb'];
   if (b.throughFloor && hole > 0) {
-    let d: number;
-    let depth: number;
-    let countersink = false;
-    if (spec) {
-      const hd = spec.headDiameter ?? defaultHeadDiameter(spec);
-      const hh = spec.headHeight ?? 0.6 * spec.diameter;
-      if (spec.head === 'flat') {
-        countersink = true;
-        d = hd + 0.4;
-        depth = (d - hole) / 2;
-      } else {
-        d = hd + 0.6;
-        depth = hh + 0.3;
-      }
-    } else {
-      d = 2 * hole;
-      depth = 0.6 * hole + 0.4;
-    }
+    let { d, depth, countersink } = counterboreFor(hole, spec);
     depth = Math.min(depth, z1 - 1.0);
     if (!countersink && depth > g.t && d > od - 1.0) {
       notes.push(`counterbore Ø${d.toFixed(2)} reduced to Ø${(od - 1).toFixed(2)} to stay inside the boss`);
@@ -259,6 +242,20 @@ export function bossGeom(g: ShellGeom, b: ShellBoss, spec?: FastenerSpec): BossG
     if (d > hole + 0.2 && depth > 0.05) cb = { d, depth, countersink };
   }
   return { boss: b, od, hole, z0, z1, cb, gussets: Math.max(0, Math.floor(b.gussets ?? 0)), notes };
+}
+
+/**
+ * Outside counterbore (or 90° countersink for flat heads) of a through-floor screw boss:
+ * from the fastener spec Ø(head + 0.6) × (head height + 0.3), else Ø2×hole × (0.6×hole + 0.4).
+ */
+export function counterboreFor(hole: number, spec?: FastenerSpec): { d: number; depth: number; countersink: boolean } {
+  if (spec) {
+    const hd = spec.headDiameter ?? defaultHeadDiameter(spec);
+    const hh = spec.headHeight ?? 0.6 * spec.diameter;
+    if (spec.head === 'flat') return { d: hd + 0.4, depth: (hd + 0.4 - hole) / 2, countersink: true };
+    return { d: hd + 0.6, depth: hh + 0.3, countersink: false };
+  }
+  return { d: 2 * hole, depth: 0.6 * hole + 0.4, countersink: false };
 }
 
 /** Default head diameter for a fastener spec when not given. */

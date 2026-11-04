@@ -7,9 +7,11 @@
  *  - Only primitives cross the boundary: the chip API object is built inside the context by the
  *    shared prelude; host values are JSON-encoded through a SharedArrayBuffer. No host object or
  *    function ever enters the context (no require / process / host globalThis).
- *  - Calls are synchronous (Atomics spin-then-wait RPC, ~1 µs round trip). Each hook call has a
- *    wall-clock budget (default 50 ms, host callback time excluded); on overrun the worker is
- *    terminated and every instance of this sandbox fails with a timeout ScriptError.
+ *  - Calls are synchronous (Atomics spin-then-wait RPC, ~5 µs per call). Each hook call has a
+ *    wall-clock budget (default 50 ms, host callback time excluded); on overrun the script's worker
+ *    is terminated and its instances fail with a timeout ScriptError.
+ *  - One worker per compiled script, started on demand and stopped when idle (no thread leaks
+ *    even if the caller never calls dispose()).
  *
  * Node-only module: never import it from browser code. Import path:
  *   import { createNodeSandbox } from '@pcbcad/sim/mixed/sandbox-node';
@@ -18,6 +20,7 @@
  * primitive-only bridge and disabled code generation are defence in depth. Run fully hostile code
  * under OS-level isolation as well.
  */
+import vm from 'node:vm';
 import { Worker } from 'node:worker_threads';
 import { PRELUDE_SRC, cleanStack, sourceName } from './script-api';
 import { ScriptError, type CompiledScript, type ScriptHost, type ScriptInstance, type ScriptSandbox, type ScriptShape, type ScriptValue } from './types';
@@ -29,8 +32,10 @@ export interface NodeSandboxOptions {
   setupTimeoutMs?: number;
   /** Worker heap limit (MB, default 128). */
   maxHeapMb?: number;
-  /** Message buffer size in UTF-16 code units (default 4M ≈ 8 MB). */
+  /** Message buffer size per worker in UTF-16 code units (default 2M ≈ 4 MB). */
   bufferChars?: number;
+  /** Stop a script's worker this long after its last instance is disposed (ms, default 1000). */
+  idleShutdownMs?: number;
 }
 
 const SPIN = 20000;
@@ -142,25 +147,22 @@ for (;;) {
 }
 `;
 
-class NodeSandbox implements ScriptSandbox {
-  readonly isolated = true;
+/** One worker thread + shared-memory RPC channel (hosts every instance of one compiled script). */
+class WorkerChannel {
   private readonly worker: Worker;
   private readonly ctl: Int32Array;
   private readonly data: Uint16Array;
-  private readonly timeoutMs: number;
-  private readonly setupTimeoutMs: number;
-  private dead: string | null = null;
-  private nextId = 1;
-  private readonly hosts = new Map<number, ScriptHost>();
+  dead: string | null = null;
+  nextId = 1;
+  live = 0;
+  readonly hosts = new Map<number, ScriptHost>();
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(opts: NodeSandboxOptions = {}) {
-    this.timeoutMs = opts.timeoutMs ?? 50;
-    this.setupTimeoutMs = opts.setupTimeoutMs ?? 3000;
-    const chars = opts.bufferChars ?? 4 * 1024 * 1024;
-    const sab = new SharedArrayBuffer(64 + chars * 2);
+  constructor(opts: Required<Pick<NodeSandboxOptions, 'maxHeapMb' | 'bufferChars'>>) {
+    const sab = new SharedArrayBuffer(64 + opts.bufferChars * 2);
     this.ctl = new Int32Array(sab, 0, 16);
     this.data = new Uint16Array(sab, 64);
-    const heap = opts.maxHeapMb ?? 128;
+    const heap = opts.maxHeapMb;
     this.worker = new Worker(WORKER_SRC, {
       eval: true,
       workerData: { sab, prelude: PRELUDE_SRC },
@@ -171,27 +173,26 @@ class NodeSandbox implements ScriptSandbox {
     });
     this.worker.unref();
     this.worker.on('error', (e) => {
-      this.dead = `sandbox worker crashed: ${e.message}`;
+      if (!this.dead) this.dead = `sandbox worker crashed: ${e.message}`;
     });
     this.worker.on('exit', () => {
       if (!this.dead) this.dead = 'sandbox worker exited';
     });
-    // wait for the worker to come up
     const deadline = Date.now() + 15000;
     while (Atomics.load(this.ctl, 1) === 0) {
       const left = deadline - Date.now();
-      if (left <= 0 || Atomics.wait(this.ctl, 1, 0, Math.min(left, 100)) === 'timed-out') {
-        if (Date.now() >= deadline) {
-          this.kill('sandbox worker did not start');
-          throw new ScriptError('sandbox', 'Script sandbox worker did not start');
-        }
+      if (left <= 0) {
+        this.kill('sandbox worker did not start');
+        throw new ScriptError('sandbox', 'Script sandbox worker did not start');
       }
+      Atomics.wait(this.ctl, 1, 0, Math.min(left, 100));
+      if (this.dead) throw new ScriptError('sandbox', `Script sandbox worker failed to start (${this.dead})`);
     }
     Atomics.store(this.ctl, 1, 0);
   }
 
   private write(s: string): void {
-    if (s.length > this.data.length) throw new ScriptError('sandbox', 'message too large for the sandbox buffer');
+    if (s.length > this.data.length) throw new ScriptError('sandbox', 'message too large for the sandbox buffer (raise bufferChars)');
     const d = this.data;
     for (let i = 0; i < s.length; i++) d[i] = s.charCodeAt(i);
     this.ctl[2] = s.length;
@@ -204,9 +205,24 @@ class NodeSandbox implements ScriptSandbox {
     return s;
   }
 
-  private kill(reason: string): void {
+  kill(reason: string): void {
     if (!this.dead) this.dead = reason;
+    if (this.idleTimer) clearTimeout(this.idleTimer);
     void this.worker.terminate();
+  }
+
+  /** Stop the worker shortly after its last instance was disposed (it restarts on demand). */
+  scheduleIdleShutdown(ms: number): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => {
+      if (this.live === 0) this.kill('idle');
+    }, ms);
+    (this.idleTimer as { unref?: () => void }).unref?.();
+  }
+
+  cancelIdleShutdown(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
   }
 
   /** Block until ctl[1] != 0 or the deadline passes. */
@@ -223,7 +239,7 @@ class NodeSandbox implements ScriptSandbox {
   }
 
   request(script: string, msg: unknown[], budgetMs: number): unknown {
-    if (this.dead) throw new ScriptError(script, `Script sandbox unavailable (${this.dead})`, this.dead.includes('timed out'));
+    if (this.dead) throw new ScriptError(script, `Script sandbox unavailable (${this.dead})`, /timed out/.test(this.dead));
     const ctl = this.ctl;
     this.write(JSON.stringify(msg));
     Atomics.store(ctl, 1, 0);
@@ -234,7 +250,7 @@ class NodeSandbox implements ScriptSandbox {
     let callbacks = 0;
     for (;;) {
       if (!this.waitHost(Math.min(deadline, hardDeadline))) {
-        const why = this.dead && !this.dead.includes('timed out') ? this.dead : `timed out after ${budgetMs} ms`;
+        const why = this.dead && !/timed out|idle/.test(this.dead) ? this.dead : `timed out after ${budgetMs} ms`;
         this.kill(`script '${script}' ${why}`);
         throw new ScriptError(script, `Script '${script}' ${why} (sandbox terminated)`, true);
       }
@@ -265,20 +281,54 @@ class NodeSandbox implements ScriptSandbox {
       Atomics.notify(ctl, 0);
     }
   }
+}
+
+class NodeSandbox implements ScriptSandbox {
+  readonly isolated = true;
+  private readonly timeoutMs: number;
+  private readonly setupTimeoutMs: number;
+  private readonly idleMs: number;
+  private readonly channelOpts: Required<Pick<NodeSandboxOptions, 'maxHeapMb' | 'bufferChars'>>;
+  private readonly channels = new Set<WorkerChannel>();
+
+  constructor(opts: NodeSandboxOptions = {}) {
+    this.timeoutMs = opts.timeoutMs ?? 50;
+    this.setupTimeoutMs = opts.setupTimeoutMs ?? 3000;
+    this.idleMs = opts.idleShutdownMs ?? 1000;
+    this.channelOpts = { maxHeapMb: opts.maxHeapMb ?? 128, bufferChars: opts.bufferChars ?? 2 * 1024 * 1024 };
+  }
 
   compile(code: string, name: string): CompiledScript {
-    const sid = this.nextId++;
-    this.request(name, ['compile', sid, String(code), sourceName(name)], this.setupTimeoutMs);
+    // syntax check in the host: compiling a vm.Script does not execute anything
+    try {
+      new vm.Script(`(function (chip, mcu) {\n${code}\n})`, { filename: `behavior:${sourceName(name)}`, lineOffset: -1 });
+    } catch (e) {
+      throw new ScriptError(name, `Syntax error in ${name}: ${(e as Error).message}`);
+    }
+    let channel: WorkerChannel | null = null;
+    const ensureChannel = (): WorkerChannel => {
+      if (channel && !channel.dead) return channel;
+      const ch = new WorkerChannel(this.channelOpts);
+      this.channels.add(ch);
+      ch.request(name, ['compile', 1, String(code), sourceName(name)], this.setupTimeoutMs);
+      channel = ch;
+      return ch;
+    };
     return {
       name,
       instantiate: ({ host, params, meta }): ScriptInstance => {
-        const iid = this.nextId++;
-        this.hosts.set(iid, host);
+        const ch = ensureChannel();
+        ch.cancelIdleShutdown();
+        const iid = ch.nextId++;
+        ch.hosts.set(iid, host);
+        ch.live++;
         let shapeJson: unknown;
         try {
-          shapeJson = this.request(name, ['inst', sid, iid, JSON.stringify(params ?? {}), JSON.stringify(meta ?? {})], this.setupTimeoutMs);
+          shapeJson = ch.request(name, ['inst', 1, iid, JSON.stringify(params ?? {}), JSON.stringify(meta ?? {})], this.setupTimeoutMs);
         } catch (e) {
-          this.hosts.delete(iid);
+          ch.hosts.delete(iid);
+          ch.live--;
+          if (ch.live === 0 && !ch.dead) ch.scheduleIdleShutdown(this.idleMs);
           throw e;
         }
         const shape = JSON.parse(String(shapeJson)) as ScriptShape;
@@ -290,6 +340,7 @@ class NodeSandbox implements ScriptSandbox {
           }
           return r === null ? undefined : r;
         };
+        let disposed = false;
         return {
           shape,
           invoke: (path: string, t: number, args: ScriptValue[] = []): unknown => {
@@ -297,17 +348,21 @@ class NodeSandbox implements ScriptSandbox {
             let last = args.length;
             while (last > 0 && args[last - 1] === undefined) last--;
             for (let i = 0; i < last; i++) msg.push(args[i] === undefined ? null : args[i]);
-            return decode(this.request(name, msg, this.timeoutMs));
+            return decode(ch.request(name, msg, this.timeoutMs));
           },
-          snapshot: (): unknown => decode(this.request(name, ['call', iid, 'state', NaN], this.timeoutMs)),
+          snapshot: (): unknown => decode(ch.request(name, ['call', iid, 'state', null], this.timeoutMs)),
           dispose: (): void => {
-            this.hosts.delete(iid);
-            if (!this.dead) {
+            if (disposed) return;
+            disposed = true;
+            ch.hosts.delete(iid);
+            ch.live--;
+            if (!ch.dead) {
               try {
-                this.request(name, ['dispose', iid], this.timeoutMs);
+                ch.request(name, ['dispose', iid], this.timeoutMs);
               } catch {
                 /* ignore */
               }
+              if (ch.live === 0) ch.scheduleIdleShutdown(this.idleMs);
             }
           },
         };
@@ -316,13 +371,18 @@ class NodeSandbox implements ScriptSandbox {
   }
 
   dispose(): void {
-    this.kill('disposed');
+    for (const ch of this.channels) ch.kill('disposed');
+    this.channels.clear();
   }
 }
 
 /**
- * Create an isolated script sandbox (worker thread + node:vm, per-call timeout). Call
- * `dispose()` when done to stop the worker (it is unref'd and never keeps the process alive).
+ * Create an isolated script sandbox (node:vm contexts in worker threads, per-call timeout).
+ * Each compiled script gets its own worker, started on first instantiate() and stopped
+ * automatically `idleShutdownMs` after its last instance is disposed (runMixedSignal disposes its
+ * instances at the end of a run), so a sandbox can be reused or simply dropped without leaking
+ * threads. A timeout kills only the offending script's worker; later runs start a fresh one.
+ * `dispose()` stops everything immediately.
  */
 export function createNodeSandbox(opts: NodeSandboxOptions = {}): ScriptSandbox {
   return new NodeSandbox(opts);

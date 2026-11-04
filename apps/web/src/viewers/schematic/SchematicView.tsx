@@ -7,7 +7,7 @@ import { fitView, PanZoom, type View2D } from '../common/panzoom';
 import { useViewerTheme, type ViewerTheme } from '../common/theme';
 import { cx, FloatPanel, ToolButton } from '../common/ui';
 import { LABEL, layoutSchematic, REF_SIZE, VALUE_SIZE, type PlacedSymbol, type SchLayout, type Terminal } from './layout';
-import { displayName, G, overlined, type Prim } from './symbols';
+import { G, nameRuns, type Fill } from './symbols';
 
 export interface SchematicViewProps {
   project: Project;
@@ -47,15 +47,20 @@ function makeMeasure(fontFamily: string) {
 
 /* ------------------------------------------- rendering ------------------------------------------ */
 
-const fillOf = (f: Prim extends { fill?: infer F } ? F : never) =>
+const fillOf = (f: Fill | undefined) =>
   f === 'body' ? 'var(--sch-body)' : f === 'tint' ? 'var(--sch-tint)' : f === 'stroke' ? 'var(--sch-sym)' : f === 'bg' ? 'var(--sch-bg)' : 'none';
 
 function PinName({ text, x, y, size, anchor, cls, rot }: { text: string; x: number; y: number; size: number; anchor: 'start' | 'middle' | 'end'; cls: string; rot?: number }) {
-  const shown = displayName(text);
-  const over = overlined(text);
+  const runs = nameRuns(text);
   return (
     <text x={x} y={y} fontSize={size} textAnchor={anchor} dominantBaseline="central" className={cls} transform={rot ? `rotate(${rot} ${x} ${y})` : undefined}>
-      {over ? <tspan textDecoration="overline">{shown}</tspan> : shown}
+      {runs.length === 1 && !runs[0].over
+        ? text
+        : runs.map((r, i) => (
+            <tspan key={i} style={r.over ? { textDecoration: 'overline' } : undefined}>
+              {r.text}
+            </tspan>
+          ))}
     </text>
   );
 }
@@ -108,7 +113,7 @@ function SymbolBody({ s }: { s: PlacedSymbol }) {
                 textAnchor={d === 'up' || d === 'down' ? 'end' : 'middle'}
                 dominantBaseline={d === 'up' || d === 'down' ? 'central' : 'auto'}
               >
-                {p.numbers.length > 2 ? `${p.numbers[0]}…` : p.numbers.join(',')}
+                {p.numbers.length > 4 ? `${p.numbers.slice(0, 3).join(',')}…` : p.numbers.join(',')}
               </text>
             )}
           </g>

@@ -54,20 +54,22 @@ function compH(adc, tf) {
   if (v > 419430400) v = 419430400;
   return v >> 12;
 }
-// smallest x in [lo, hi] with f(x) >= target (f non-decreasing)
-function search(lo, hi, f, target) {
+// x in [lo, hi] whose f(x) is nearest to target (f non-decreasing; binary search + neighbour check)
+function nearest(lo, hi, f, target) {
+  const lo0 = lo;
   while (lo < hi) { const mid = (lo + hi) >>> 1; if (f(mid) >= target) hi = mid; else lo = mid + 1; }
+  if (lo > lo0 && Math.abs(f(lo - 1) - target) <= Math.abs(f(lo) - target)) lo--;
   return lo;
 }
 function rawFor(env) {
   const tTarget = Math.round(env.t * 100);
-  const adcT = search(0, (1 << 20) - 1, (x) => compT(x)[0], tTarget);
+  const adcT = nearest(0, (1 << 20) - 1, (x) => compT(x)[0], tTarget);
   const tf = compT(adcT)[1];
-  const pTarget = Math.round(env.p * 256);
+  const pTarget = env.p * 256;
   // pressure decreases with adc: search on the negated function
-  const adcP = search(0, (1 << 20) - 1, (x) => -compP(x, tf), -pTarget);
-  const hTarget = Math.round(Math.min(100, Math.max(0, env.h)) * 1024);
-  const adcH = search(0, 65535, (x) => compH(x, tf), hTarget);
+  const adcP = nearest(0, (1 << 20) - 1, (x) => -compP(x, tf), -pTarget);
+  const hTarget = Math.min(100, Math.max(0, env.h)) * 1024;
+  const adcH = nearest(0, 65535, (x) => compH(x, tf), hTarget);
   return { adcT, adcP, adcH };
 }
 

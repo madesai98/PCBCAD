@@ -152,7 +152,8 @@ function checkShell(s: EnclosureShell, I: Issues, project?: Project): void {
       continue;
     }
     for (const n of bg.notes) I.add('boss-geometry', 'warning', `Boss ${b.id}: ${n}`, 'Enlarge the boss OD or use a smaller fastener head.', at, b.id);
-    const pocket = pocketAt(g, t + 0.01);
+    // wall distance measured just above the floor fillet (the fillet itself is meant to blend)
+    const pocket = pocketAt(g, Math.min(bg.z1, t + g.fillet + 0.01));
     const dWall = -sdRoundRect(b.x, b.y, pocket.hx, pocket.hy, pocket.r);
     if (dWall < 0) I.add('boss-outside', 'error', `Boss ${b.id} centre is outside the inner pocket`, 'Move it inside the enclosure.', at, b.id);
     else if (dWall < bg.od / 2 + 0.25 * t)
@@ -163,7 +164,8 @@ function checkShell(s: EnclosureShell, I: Issues, project?: Project): void {
       else if (ratio > 2.6) I.add('boss-od', 'info', `Boss ${b.id}: OD/hole = ${fmt(ratio)} (> 2.5) — unnecessarily thick boss`, `Reduce OD to ≈ ${fmt(2.2 * bg.hole, 1)} mm or core it out.`, at, b.id);
     }
     if (bg.hole > 0) {
-      const bw = (bg.od - bg.hole) / 2;
+      // a counterbore reaching through the floor hollows the boss/floor junction
+      const bw = bg.cb && !bg.cb.countersink && bg.cb.depth >= t ? (bg.od - bg.cb.d) / 2 : (bg.od - bg.hole) / 2;
       if (bw > 1.25 * t) I.add('boss-sink', 'warning', `Boss ${b.id}: wall ${fmt(bw)} mm > 1.25 × nominal wall — sink mark on the outer surface and voids`, `Keep boss wall ≤ 0.6–0.75 × wall (${fmt(0.75 * t)} mm) where cosmetic, or core the base of the boss.`, at, b.id);
       else if (bw > 0.75 * t) I.add('boss-sink', 'info', `Boss ${b.id}: wall ${fmt(bw)} mm > 0.75 × nominal wall — possible sink opposite the boss`, `Acceptable on non-cosmetic faces; otherwise thin the boss wall toward ${fmt(0.75 * t)} mm or use a sink-hiding texture.`, at, b.id);
     } else if (bg.od > 1.5 * t) I.add('boss-solid', 'warning', `Boss ${b.id} is solid (no hole) with Ø${fmt(bg.od)} mm — thick section`, 'Core it out (hole) or reduce its diameter.', at, b.id);

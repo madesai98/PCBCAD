@@ -1,6 +1,6 @@
 import type { FootprintDef, PackageSpec, Vec2 } from '@pcbcad/core';
 import { CHIP_SIZES } from '../package/defaults';
-import { rnd } from '../util/num';
+import { floorTo, rnd } from '../util/num';
 import { FootprintBuilder, fmtMm, padBox, type Box } from './builder';
 import { FILLETS, ipcLand, range, type Fillets, type Range } from './ipc';
 
@@ -53,6 +53,11 @@ function noLeadWidth(pitch: number): Range {
   if (pitch >= 0.49) return { min: 0.18, max: 0.3 };
   if (pitch >= 0.39) return { min: 0.15, max: 0.25 };
   return { min: 0.12, max: 0.22 };
+}
+
+/** Widest land that keeps a copper gap of max(0.15, 0.3·pitch) between neighbours. */
+export function maxLandWidth(pitch: number): number {
+  return floorTo(pitch - Math.max(0.15, 0.3 * pitch), 0.05);
 }
 
 function gullFillets(pitch: number): Fillets {
@@ -211,10 +216,12 @@ export function melfFootprint(s: PackageSpec): FootprintDef {
 /** Generic dual-row gull-wing land pattern (SOT-23, SOIC, SSOP, TSSOP, MSOP). */
 function gullLand(s: PackageSpec, T: Range, spanTol = 0.2) {
   const pitch = s.pitch ?? 1.27;
+  // JEDEC MO-153 (TSSOP) leads are narrower than MO-150/MO-187 at the same pitch
+  const W = s.family === 'tssop' && pitch > 0.6 ? { min: 0.19, max: 0.3 } : leadWidth(pitch);
   return ipcLand({
     L: range(s.leadSpan ?? (s.bodyW ?? 3.9) + 2, spanTol),
     T,
-    W: leadWidth(pitch),
+    W,
     fillets: gullFillets(pitch),
     minGap: (s.bodyW ?? 3.9) - 0.05,
   });
@@ -227,7 +234,7 @@ export function sot23Footprint(s: PackageSpec): FootprintDef {
   const sc70 = s.extra?.variant === 'sc70';
   const land = gullLand(s, sc70 ? { min: 0.26, max: 0.46 } : { min: 0.3, max: 0.6 }, 0.2);
   const len = s.padW ?? land.length;
-  const wid = s.padH ?? land.width;
+  const wid = s.padH ?? Math.min(land.width, maxLandWidth(pitch));
   const c = exNum(s, 'padCenter') ?? land.center;
   const fp = new FootprintBuilder(`${sc70 ? 'SC-70' : 'SOT-23'}${pins === 3 ? '' : `-${pins}`}`);
   let pos: { num: string; x: number; y: number }[];
@@ -333,7 +340,7 @@ export function dualGullFootprint(s: PackageSpec): FootprintDef {
   const T: Range = s.family === 'soic' ? { min: 0.4, max: 1.27 } : s.family === 'msop' ? { min: 0.4, max: 0.7 } : s.family === 'ssop' ? { min: 0.55, max: 0.95 } : { min: 0.45, max: 0.75 };
   const land = gullLand(s, T, s.family === 'msop' ? 0.15 : 0.2);
   const len = s.padW ?? land.length;
-  const wid = s.padH ?? land.width;
+  const wid = s.padH ?? Math.min(land.width, maxLandWidth(pitch));
   const c = exNum(s, 'padCenter') ?? land.center;
   const label = s.family.toUpperCase();
   const ep = s.exposedPad;
@@ -371,7 +378,7 @@ export function qfpFootprint(s: PackageSpec): FootprintDef {
   const lx = ipcLand({ L: range(spanX, 0.2), T, W, fillets: fil, minGap: bw - 0.05 });
   const ly = ipcLand({ L: range(spanY, 0.2), T, W, fillets: fil, minGap: bl - 0.05 });
   const len = s.padW ?? lx.length;
-  const wid = s.padH ?? lx.width;
+  const wid = s.padH ?? Math.min(lx.width, maxLandWidth(pitch));
   const variant = s.extra?.variant === 'tqfp' ? 'TQFP' : 'LQFP';
   const fp = new FootprintBuilder(`${variant}-${pins}_${fmtMm(bw)}x${fmtMm(bl)}mm_P${fmtMm(pitch)}mm`);
   const pos = quad(nx, ny, pitch, lx.center, ly.center);
@@ -411,7 +418,7 @@ export function noLeadFootprint(s: PackageSpec): FootprintDef {
   const lx = ipcLand({ L: range(bw, 0.1), T, W, fillets: FILLETS.noLead, minGap: gxMin });
   const ly = ipcLand({ L: range(bl, 0.1), T, W, fillets: FILLETS.noLead, minGap: dual ? undefined : gyMin });
   const len = s.padW ?? lx.length;
-  const wid = s.padH ?? lx.width;
+  const wid = s.padH ?? Math.min(lx.width, maxLandWidth(pitch));
   const ep = s.exposedPad;
   const kind = dual ? 'DFN' : 'QFN';
   const fp = new FootprintBuilder(`${kind}-${pins}${ep ? '-1EP' : ''}_${fmtMm(bw)}x${fmtMm(bl)}mm_P${fmtMm(pitch)}mm${ep ? `_EP${fmtMm(ep.w)}x${fmtMm(ep.h)}mm` : ''}`);

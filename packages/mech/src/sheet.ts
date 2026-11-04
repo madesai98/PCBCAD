@@ -475,6 +475,32 @@ function processEdge(c: BuildCtx, face: SheetFaceModel, e: Edge2, flanges: Sheet
 
 /** Build the shared sheet-metal model (faces, bends, issues). Pure JS. */
 export function buildSheetModel(part: SheetMetalPart): SheetModel {
+  // Corner notches and available edge spans depend on which edges carry flanges; if every flange on
+  // an edge is rejected (no usable width, bad angle…), rebuild without treating that edge as flanged.
+  let skip = new Set<string>();
+  for (let pass = 0; pass < 4; pass++) {
+    const model = buildSheetModelPass(part, skip);
+    const placedEdges = new Set(model.bends.filter((b) => b.parentId === 'base').map((b) => b.edge.name));
+    const failed = new Set([...new Set((part.flanges ?? []).map((f) => f.edge))].filter((e) => e !== 'far' && !skip.has(e) && !placedEdges.has(e)));
+    if (!failed.size) return finishModel(model);
+    skip = new Set([...skip, ...failed]);
+  }
+  return finishModel(buildSheetModelPass(part, skip));
+}
+
+function finishModel(model: SheetModel): SheetModel {
+  const base = model.faces.find((f) => f.id === 'base');
+  if (base && base.poly.length < 3)
+    model.issues.push({
+      code: 'base-consumed',
+      severity: 'error',
+      message: 'Bend setbacks, reliefs and corner notches consume the entire base face',
+      suggestion: 'Enlarge the base or reduce bend radii / flange count.',
+    });
+  return model;
+}
+
+function buildSheetModelPass(part: SheetMetalPart, skip: Set<string>): SheetModel {
   const t = Number(part.thickness);
   const W = Number(part.base?.width);
   const Lb = Number(part.base?.length);
@@ -528,7 +554,7 @@ export function buildSheetModel(part: SheetMetalPart): SheetModel {
       const th = Number(fl.angle);
       if (Number.isFinite(th) && Math.abs(th) >= 0.5 && Math.abs(th) <= 175 && r >= 0) m = Math.max(m, outsideSetback(th, r, t));
     }
-    return byEdge.has(name) ? m : -1;
+    return byEdge.has(name) && !skip.has(name) ? m : -1;
   };
   // corner notches where two flanged edges meet
   const corners: { x: '+x' | '-x'; y: '+y' | '-y' }[] = [

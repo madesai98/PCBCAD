@@ -283,10 +283,10 @@ function buildTwo(ctx: SymbolContext, cat: PartCategory): SymbolGeom | null {
   const prims = twoBody(cat, accent);
   extras.forEach((t, i) => {
     const y = i === 0 ? 0 : 2.54;
-    prims.push({ t: 'path', d: `M1.0 ${y}H${G}`, w: 0.2 });
-    pins.push({ ...t, x: G, y, dir: 'right', line: 0, showNumber: false });
+    prims.push({ t: 'path', d: `M-1.0 ${y}H${-G}`, w: 0.2 });
+    pins.push({ ...t, x: -G, y, dir: 'left', line: 0, showNumber: false });
   });
-  return { kind: 'two', prims, pins, box: { x0: -1.9, y0: -L, x1: extras.length ? G : 1.9, y1: L }, accent };
+  return { kind: 'two', prims, pins, box: { x0: extras.length ? -G : -1.9, y0: -L, x1: cat === 'led' ? 2.9 : 1.9, y1: L }, accent };
 }
 
 function buildThree(ctx: SymbolContext, cat: PartCategory): SymbolGeom | null {
@@ -426,11 +426,13 @@ function buildBox(ctx: SymbolContext): SymbolGeom {
   const rows = Math.max(groups.left.length, groups.right.length, 1);
   const topSpacing = Math.max(G, Math.ceil((nameW(groups.up) + 1.0) / G) * G);
   const botSpacing = Math.max(G, Math.ceil((nameW(groups.down) + 1.0) / G) * G);
+  const refBlock = Math.max(ctx.measure(ctx.comp.ref, 1.5), ctx.measure(ctx.comp.value ?? part?.value ?? part?.mpn ?? '', 1.25)) + 1.5;
   let w = Math.max(
     4 * G,
     Math.ceil((nameW(groups.left) + nameW(groups.right) + 3.2) / G) * G,
     (groups.up.length + 1) * topSpacing,
     (groups.down.length + 1) * botSpacing,
+    groups.up.length ? Math.ceil((refBlock + (groups.up.length - 1) * topSpacing + topSpacing / 2 + G) / G) * G : 0,
   );
   if (Math.round(w / G) % 2 === 1) w += G; // keep the centre on grid
   const padTop = groups.up.length ? 2 * G : G;
@@ -448,25 +450,25 @@ function buildBox(ctx: SymbolContext): SymbolGeom {
   groups.left.forEach((p, i) => {
     const y = y0 + padTop + i * G;
     add(p, x0 - PL, y, 'left');
-    prims.push({ t: 'text', x: x0 + 0.7, y, text: displayName(p.name), size: PIN_NAME_SIZE, anchor: 'start', cls: 'pinname' });
+    prims.push({ t: 'text', x: x0 + 0.7, y, text: p.name, size: PIN_NAME_SIZE, anchor: 'start', cls: 'pinname' });
   });
   groups.right.forEach((p, i) => {
     const y = y0 + padTop + i * G;
     add(p, x0 + w + PL, y, 'right');
-    prims.push({ t: 'text', x: x0 + w - 0.7, y, text: displayName(p.name), size: PIN_NAME_SIZE, anchor: 'end', cls: 'pinname' });
+    prims.push({ t: 'text', x: x0 + w - 0.7, y, text: p.name, size: PIN_NAME_SIZE, anchor: 'end', cls: 'pinname' });
   });
   const spread = (n: number, spacing: number) => Array.from({ length: n }, (_, i) => (i - (n - 1) / 2) * spacing);
-  spread(groups.up.length, topSpacing).forEach((x, i) => {
-    const p = groups.up[i];
-    const gx = Math.round(x / G) * G;
+  // Top pins hug the right so the reference / value block above the top-left corner stays clear.
+  groups.up.forEach((p, i) => {
+    const gx = Math.round((x0 + w - G - (groups.up.length - 1 - i) * topSpacing) / G) * G;
     add(p, gx, y0 - PL, 'up');
-    prims.push({ t: 'text', x: gx, y: y0 + 1.25, text: displayName(p.name), size: PIN_NAME_SIZE, anchor: 'middle', cls: 'pinname' });
+    prims.push({ t: 'text', x: gx, y: y0 + 1.25, text: p.name, size: PIN_NAME_SIZE, anchor: 'middle', cls: 'pinname' });
   });
   spread(groups.down.length, botSpacing).forEach((x, i) => {
     const p = groups.down[i];
     const gx = Math.round(x / G) * G;
     add(p, gx, y0 + h + PL, 'down');
-    prims.push({ t: 'text', x: gx, y: y0 + h - 1.25, text: displayName(p.name), size: PIN_NAME_SIZE, anchor: 'middle', cls: 'pinname' });
+    prims.push({ t: 'text', x: gx, y: y0 + h - 1.25, text: p.name, size: PIN_NAME_SIZE, anchor: 'middle', cls: 'pinname' });
   });
   return { kind: 'box', prims, pins: sp, box: { x0: x0 - PL, y0: y0 - (groups.up.length ? PL : 0), x1: x0 + w + PL, y1: y0 + h + (groups.down.length ? PL : 0) } };
 }
@@ -496,7 +498,7 @@ function buildConnector(ctx: SymbolContext): SymbolGeom {
     prims.push({ t: 'rect', x: cx - 0.55, y: y - 0.32, w: 1.1, h: 0.64, rx: 0.15, fill: 'stroke', sw: 0 });
     prims.push({ t: 'text', x: right ? cx - 1.0 : cx + 1.0, y, text: p.number, size: PIN_NUM_SIZE, anchor: right ? 'end' : 'start', cls: 'pinnum' });
     const nm = label(p);
-    if (nm) prims.push({ t: 'text', x: right ? x0 + 0.8 : x0 + w - 0.8, y, text: displayName(nm), size: PIN_NAME_SIZE, anchor: right ? 'start' : 'end', cls: 'pinname' });
+    if (nm) prims.push({ t: 'text', x: right ? x0 + 0.8 : x0 + w - 0.8, y, text: nm, size: PIN_NAME_SIZE, anchor: right ? 'start' : 'end', cls: 'pinname' });
   });
   return { kind: 'connector', prims, pins: sp, box: { x0: side === 'left' ? x0 - G : x0, y0, x1: side === 'right' ? x0 + w + G : x0 + w, y1: y0 + h } };
 }
@@ -506,8 +508,19 @@ export function displayName(name: string): string {
   return name.replace(/~\{([^}]*)\}/g, '$1').replace(/~/g, '');
 }
 
-export function overlined(name: string): boolean {
-  return /~/.test(name);
+/** Split a pin name into plain / overlined runs: "PC6/~RESET" → [PC6/, RESET̅], "~{CS}/A0" → [CS̅, /A0]. */
+export function nameRuns(name: string): { text: string; over: boolean }[] {
+  const runs: { text: string; over: boolean }[] = [];
+  const re = /~\{([^}]*)\}|~([^/\s,]+)/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(name))) {
+    if (m.index > last) runs.push({ text: name.slice(last, m.index), over: false });
+    runs.push({ text: m[1] ?? m[2], over: true });
+    last = m.index + m[0].length;
+  }
+  if (last < name.length) runs.push({ text: name.slice(last), over: false });
+  return runs.length ? runs : [{ text: name, over: false }];
 }
 
 export function buildSymbol(ctx: SymbolContext): SymbolGeom | null {

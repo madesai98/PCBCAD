@@ -1,0 +1,27 @@
+{
+  "name": "@pcbcad/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "pcbcad": "./dist/cli.js"
+  },
+  "scripts": {
+    "dev": "tsx watch --clear-screen=false src/cli.ts --no-open --dev",
+    "build": "node scripts/build.mjs",
+    "start": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@pcbcad/core": "*",
+    "@pcbcad/parts": "*",
+    "@pcbcad/pcb": "*",
+    "@pcbcad/sim": "*",
+    "@pcbcad/mech": "*",
+    "ws": "^8.18.0",
+    "fflate": "^0.8.2"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.0",
+    "esbuild": "^0.25.0"
+  }
+}

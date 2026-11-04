@@ -1,0 +1,29 @@
+{
+  "name": "pcbcad",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Agent-driven, browser-based PCB + mechanical CAD and simulation for complete hardware products. Uses your locally installed agent CLI (Claude Code, Codex, Gemini) as the LLM provider.",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n server,web -c blue,magenta \"npm run dev -w @pcbcad/server\" \"npm run dev -w @pcbcad/web\"",
+    "build": "npm run build -w @pcbcad/web && npm run build -w @pcbcad/server",
+    "start": "node apps/server/dist/cli.js",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p apps/web/tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=20.10"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "concurrently": "^9.2.0",
+    "tsx": "^4.20.0",
+    "typescript": "~5.9.3",
+    "vitest": "^3.2.0",
+    "@types/clipper-lib": "^6.4.0"
+  }
+}

@@ -1,0 +1,10 @@
+import Module from 'manifold-3d';
+const w = await Module(); w.setup();
+const c = w.Manifold.cylinder(1, 10, 10, 6);
+console.log('cyl6 bbox', c.boundingBox(), 'vol', c.volume(), 'hex area*1', 1.5 * Math.sqrt(3) * 100);
+const r = new w.CrossSection([[[0, 0], [10, 0], [10, 1], [0, 1]]], 'EvenOdd').revolve(6);
+console.log('rev6 bbox', r.boundingBox(), r.volume());
+const m = c.getMesh(); const pts = []; for (let i = 0; i < m.vertProperties.length; i += 3) pts.push([+m.vertProperties[i].toFixed(3), +m.vertProperties[i + 1].toFixed(3), +m.vertProperties[i+2].toFixed(3)]);
+console.log(pts.filter(p => p[2] === 0).map(p => (Math.atan2(p[1], p[0]) * 180 / Math.PI).toFixed(1)));
+const m2 = r.getMesh(); const p2 = []; for (let i = 0; i < m2.vertProperties.length; i += 3) p2.push([+m2.vertProperties[i].toFixed(3), +m2.vertProperties[i + 1].toFixed(3), +m2.vertProperties[i+2].toFixed(3)]);
+console.log(p2.filter(p => p[2] === 0 && Math.hypot(p[0], p[1]) > 9).map(p => (Math.atan2(p[1], p[0]) * 180 / Math.PI).toFixed(1)));

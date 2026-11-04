@@ -29,32 +29,46 @@ airProperties(T°C)                                        // dry-air ρ, μ, k,
 * **Grid** – staggered MAC grid on the voxels: pressure/temperature at cell centres, velocity components on
   cell faces; face states: wall (any solid neighbour or closed boundary), active, fixed (fan), free (inside an
   opening reservoir).
-* **Momentum** – SIMPLEC (α_u = 0.7, α_p = 1), first-order upwind convection with full physical diffusion,
-  no-slip half-cell wall shear at solid faces, Boussinesq source −ρβ(T−T_amb)g with β = 1/(T_amb+273.15).
-  Two symmetric Gauss–Seidel sweeps per component per outer iteration.
+* **Momentum** – SIMPLEC (α_u = 0.7, α_p = 1), first-order upwind convection with full physical diffusion
+  (hybrid differencing can make the equation degenerate next to zero-gradient opening reservoirs), no-slip
+  half-cell wall shear at solid faces, Boussinesq source −ρβ(T−T_amb)g with β = 1/(T_amb+273.15). One
+  forward + one backward Gauss–Seidel sweep per component per outer iteration.
 * **Pressure correction** – SIMPLEC pressure equation solved with geometric-aggregation-AMG preconditioned CG
   to 10 % per outer iteration. Openings are p = 0 (ambient hydrostatic) Dirichlet reservoirs; sealed air
   regions get one reference cell.
 * **Energy** – conservative finite volumes over all cells: hybrid upwind/central advection in air,
   harmonic-mean conductances (conjugate air/solid interfaces), volumetric sources, `externalH` in series
-  with half a cell of solid at boundary solids. Opening cells take ambient-temperature inflow and let
-  outflow leave with the cell temperature (zero gradient). Solved each outer iteration with warm-started
-  AMG-BiCGSTAB and relaxed by α_T = 0.5; the coupled flow/energy iteration stops when the momentum and
-  continuity residuals are < 1e-4 and the extrapolated remaining temperature drift is < 0.1 % of the rise.
+  with half a cell of solid at boundary solids. Opening cells exchange with ambient through a virtual face
+  (hybrid differencing of the cell's net ambient mass exchange with half a cell of still-air conduction):
+  inflow enters at ambient temperature, outflow leaves with the cell temperature (zero gradient), and
+  without flow the opening still conducts to ambient. Solved every outer iteration with warm-started
+  AMG-preconditioned BiCGSTAB (relative residual 3e-4, monotone AMG-cycle fallback) and relaxed with
+  α_T = 0.5. (Stationary AMG cycles alone were 10–40× slower to converge the coupled problem; full
+  per-iteration energy solves are what make buoyancy-driven cases converge in tens to hundreds of
+  iterations.)
+* **Convergence** – stop when the normalised momentum residual and continuity residual are < 1e-4 and the
+  remaining temperature drift, extrapolated from the observed geometric decay of the per-iteration change,
+  is < 0.1 % of the temperature rise, for 3 consecutive iterations (default limit 1000 iterations).
 * **Final step** – an exact projection (pressure correction to 1e-10) makes all face fluxes
-  divergence-free and a final tight energy solve follows, so vent flows balance and
+  divergence-free and a final tight energy solve (1e-10) follows, so vent flows balance and
   `input = vents + walls` to round-off even when the flow iteration is stopped early.
 * **Mode** – `forced` when a fan with non-zero flow is present, else `natural`.
+* **Streamlines** – fixed-step (½ cell) midpoint integration of the normalised, trilinearly interpolated
+  staggered velocity; seeds at inflowing opening cells, fan cells and the hottest air next to heat
+  sources (traced up- and downstream); stop in solids, at the boundary or in stagnant air.
 
-## Validation (unit tests)
+## Validation (unit tests, `airflow.test.ts`; Node 22, one core)
 
 | case | result |
 |---|---|
-| solid Al cube, uniform 2 W, h_ext = 12 | T within 1 % of lumped Q/(hA) |
-| sealed 100 mm ABS box, 1 W block inside | walls = input to 1e-11, buoyant plume above the block |
-| heated vertical duct (chimney), open both ends | inflow at the bottom, outflow at the top, in = out (exact) |
-| fan duct, 1e-4 m³/s | inlet and outlet flow = fan flow (exact), chip heat carried by the air |
-| 60×40×25 vented enclosure (60 k cells) | see performance test |
+| solid Al cube, uniform 2 W, h_ext = 12 W/m²K | T within 1 % of the lumped Q/(hA) |
+| sealed 100 mm ABS box (5 mm cells), 1 W Al block | walls = input to 1e-11 W; plume rises; 98 iterations, 1.3 s |
+| heated vertical duct 40×40×200 mm, open both ends | inflow bottom / outflow top, in = out exactly, 120.8 cm³/s at 1 W; 67 iterations |
+| fan duct, 1e-4 m³/s | inlet = outlet = fan flow (to 1e-12); 41 iterations |
+| 60×40×25 vented enclosure (60 k cells, 3 W, natural convection) | 324 iterations, ≈ 19 s; 60 cm³/s chimney flow in low / out high |
+
+Grid-convergence of the coarse solution is **not** implied by these tests; they check conservation,
+boundary-condition logic and robustness.
 
 ## Accuracy limits (read before trusting a number)
 

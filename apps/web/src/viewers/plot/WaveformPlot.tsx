@@ -29,6 +29,11 @@ function toTyped(a: NumArray | ArrayLike<number>): ArrayLike<number> {
 
 const axisFont = (theme: ViewerTheme) => `11px ${theme.fontSans}`;
 
+/** "~RESET" → R̅E̅S̅E̅T̅ (combining overline) for canvas-rendered labels. */
+export function overbar(name: string): string {
+  return name.replace(/~\{([^}]*)\}|~([^\s/·,]+)/g, (_m, a: string | undefined, b: string | undefined) => [...(a ?? b ?? '')].map((c) => c + '\u0305').join(''));
+}
+
 let syncSeq = 0;
 
 /**
@@ -103,17 +108,19 @@ export function WaveformPlot({ time, signals, height = 280, title, syncKey, clas
             (unit, i): uPlot.Axis => ({
               scale: unit || '_',
               side: i % 2 === 0 ? 3 : 1,
+              // Narrow layouts keep the first two unit axes; the rest stay in the legend.
+              show: i < 2 || width >= 560,
               stroke: data.units.length > 1 ? colorOf(data.analog.findIndex((s) => (s.unit || '') === unit)) : axisStroke,
               font: axisFont(theme),
-              labelFont: `600 11px ${theme.fontSans}`,
-              label: unit || undefined,
-              labelSize: 16,
-              labelGap: 2,
-              size: 50,
+              size: (self, values) => {
+                if (!values?.length) return 40;
+                const longest = values.reduce((m, v) => Math.max(m, String(v).length), 0);
+                return Math.max(36, Math.min(80, 14 + longest * 6.6));
+              },
               gap: 4,
               grid: { show: i === 0, stroke: grid, width: 1 },
               ticks: { stroke: grid, width: 1, size: 4 },
-              values: (_u, splits) => splits.map((v) => formatValue(v, unit, 3).replace(` ${unit}`, unit ? '' : '')),
+              values: (_u, splits) => splits.map((v) => formatValue(v, unit, 3)),
             }),
           ),
         ],
@@ -121,7 +128,7 @@ export function WaveformPlot({ time, signals, height = 280, title, syncKey, clas
           { label: 't', value: (_u, v) => (v == null ? '—' : fmtTime(v, 4)) },
           ...data.analog.map(
             (s, i): uPlot.Series => ({
-              label: s.name,
+              label: overbar(s.name),
               scale: s.unit || '_',
               stroke: colorOf(i),
               width: 1.6,
@@ -156,7 +163,7 @@ export function WaveformPlot({ time, signals, height = 280, title, syncKey, clas
             grid: { show: false },
             ticks: { show: false },
             splits: () => data.digital.map((_, i) => lanes - 1 - i + 0.48),
-            values: (_u, splits) => splits.map((v) => data.digital[lanes - 1 - Math.floor(v)]?.name ?? ''),
+            values: (_u, splits) => splits.map((v) => overbar(data.digital[lanes - 1 - Math.floor(v)]?.name ?? '')),
           },
         ],
         series: [

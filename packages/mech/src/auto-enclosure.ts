@@ -430,6 +430,8 @@ export function autoEnclosure(project: Project, boardIds: string[], opts: AutoEn
   for (const p of placedBoards) boardInst.set(p.board.id, newId('inst'));
   let nb = 0;
   let nPcb = 0;
+  let nInsert = 0;
+  let nStandoff = 0;
   for (const p of level0) {
     for (const h of p.board.holes ?? []) {
       const [x, y] = toBase(h.x + p.dx, h.y + p.dy);
@@ -449,8 +451,10 @@ export function autoEnclosure(project: Project, boardIds: string[], opts: AutoEn
       base.bosses.push(boss);
       const top: Vec3 = [x, y, zb];
       const stacked = standoffs.some((s) => s.lower === p);
-      if (insertMode === 'heat-set')
+      if (insertMode === 'heat-set') {
+        nInsert++;
         fasteners.push({ id: newId('fst'), partId: ids.insert ?? '', position: [x, y, zb - ins.length / 2], direction: [0, 0, -1], joins: [baseInstId], note: `M${d} heat-set insert Ø${ins.od} × ${ins.length} in boss ${boss.id}` });
+      }
       if (!stacked) {
         nPcb++;
         const screwOk = screwSpec?.length == null || (screwSpec.length - p.tb >= engageMin && screwSpec.length <= p.tb + bottomClear - 0.5);
@@ -470,7 +474,8 @@ export function autoEnclosure(project: Project, boardIds: string[], opts: AutoEn
     for (const h of s.upper.board.holes ?? []) {
       const [x, y] = toBase(h.x + s.upper.dx, h.y + s.upper.dy);
       const zLowTop = s.lower.z + s.lower.tb;
-      fasteners.push({ id: newId('fst'), partId: ids.standoff ?? '', position: [x, y, zLowTop + s.length / 2], direction: [0, 0, -1], joins: [boardInst.get(s.lower.board.id)!, boardInst.get(s.upper.board.id)!, baseInstId], note: `M${d} hex standoff, male-female, ${s.length} mm (male end through '${s.lower.board.name}' into the insert)` });
+      nStandoff++;
+      fasteners.push({ id: newId('fst'), partId: ids.standoff ?? '', position: [x, y, zLowTop + s.length / 2], direction: [0, 0, -1], joins: [boardInst.get(s.lower.board.id)!, boardInst.get(s.upper.board.id)!, baseInstId], note: `M${d} hex standoff, male-female, ${s.length} mm (male end through '${s.lower.board.name}' into the boss insert)` });
       fasteners.push({ id: newId('fst'), partId: '', position: [x, y, s.upper.z + s.upper.tb], direction: [0, 0, -1], joins: [boardInst.get(s.upper.board.id)!], note: `M${d} × 6 pan-head screw into the standoff` });
     }
   }
@@ -483,14 +488,29 @@ export function autoEnclosure(project: Project, boardIds: string[], opts: AutoEn
   const caseLen = STD_SCREW.find((L) => L - caseEntry >= 1.5 * dCase && L - caseEntry <= caseHoleDepth - 0.3);
   if (!caseLen) notes.push(`Case screws: no standard length engages ≥ ${r1(1.5 * dCase)} mm without bottoming in the ${r1(caseHoleDepth)} mm base boss — adjust split/height`);
   const caseL = caseLen ?? STD_SCREW.find((L) => L - caseEntry >= 1.5 * dCase) ?? 20;
+  // corner bosses are tied to the two adjacent walls with ribs (no inward gussets that could reach
+  // the boards); rib ≤ 0.5·wall thick and ≤ 3·wall tall (DFM)
+  const tie = (shell: EnclosureShell, id: string, x: number, y: number, sx: number, sy: number, bossH: number) => {
+    const h = r1(Math.min(0.7 * bossH, 3 * wall));
+    const t = r1(Math.max(0.6, 0.5 * wall));
+    const reach = gWall + Rcase + wall;
+    if (h <= 0.5) return;
+    shell.ribs.push({ id: `${id}-rx`, from: [x, y], to: [x + sx * reach, y], height: h, thickness: t }, { id: `${id}-ry`, from: [x, y], to: [x, y + sy * reach], height: h, thickness: t });
+  };
   caseCorners.forEach(([sx, sy], i) => {
     const x = sx * (hx - gWall - Rcase);
     const y = sy * (hy - gWall - Rcase);
-    base.bosses.push({ id: `case${i + 1}`, x, y, outerDiameter: caseBossBase.od, holeDiameter: caseBossBase.hole, height: r1(Hb - wall), kind: insertMode === 'heat-set' ? 'insert' : 'screw', gussets: 4, ...(insertMode === 'heat-set' && ids.insert ? { fastenerPartId: ids.insert } : {}) });
+    const hBase = r1(Hb - wall);
+    const hCover = r1(Hc - wall - 0.2);
+    base.bosses.push({ id: `case${i + 1}`, x, y, outerDiameter: caseBossBase.od, holeDiameter: caseBossBase.hole, height: hBase, kind: insertMode === 'heat-set' ? 'insert' : 'screw', gussets: 0, ...(insertMode === 'heat-set' && ids.insert ? { fastenerPartId: ids.insert } : {}) });
+    tie(base, `case${i + 1}`, x, y, sx, sy, hBase);
     const [ux, uy] = toCover(x, y);
-    cover.bosses.push({ id: `case${i + 1}`, x: ux, y: uy, outerDiameter: coverBossOD, holeDiameter: caseClear, height: r1(Hc - wall - 0.2), kind: 'clearance', throughFloor: true, gussets: 4, ...(ids.caseScrew ?? ids.screw ? { fastenerPartId: ids.caseScrew ?? ids.screw } : {}) });
-    if (insertMode === 'heat-set')
+    cover.bosses.push({ id: `case${i + 1}`, x: ux, y: uy, outerDiameter: coverBossOD, holeDiameter: caseClear, height: hCover, kind: 'clearance', throughFloor: true, gussets: 0, ...(ids.caseScrew ?? ids.screw ? { fastenerPartId: ids.caseScrew ?? ids.screw } : {}) });
+    tie(cover, `case${i + 1}`, ux, uy, sx, -sy, hCover);
+    if (insertMode === 'heat-set') {
+      nInsert++;
       fasteners.push({ id: newId('fst'), partId: ids.insert ?? '', position: [x, y, Hb - insCase.length / 2], direction: [0, 0, -1], joins: [baseInstId], note: `M${dCase} heat-set insert in case boss case${i + 1}` });
+    }
     const caseSpecOk = caseScrewSpec?.length == null || (caseScrewSpec.length - caseEntry >= 1.5 * dCase && caseScrewSpec.length - caseEntry <= caseHoleDepth - 0.3);
     const caseId = ids.caseScrew ?? ids.screw;
     fasteners.push({ id: newId('fst'), partId: caseId && caseSpecOk ? caseId : '', position: [x, y, Hb + Hc - cbDepth], direction: [0, 0, -1], joins: [coverInstId, baseInstId], note: `M${dCase} × ${caseL} pan-head case screw (counterbore Ø${r2(cb.d)} × ${r2(cbDepth)})` });
@@ -604,7 +624,7 @@ export function autoEnclosure(project: Project, boardIds: string[], opts: AutoEn
   notes.unshift(
     `Enclosure ${W} × ${D} × ${r1(Hb + Hc)} mm outside (${materialId}, ${process}, wall ${wall} mm, draft ${draftDeg}°, corner R${cornerRadius}); split at ${Hb} mm (base ${Hb} mm + cover ${Hc} mm)`,
     `Board(s) on ${level0.reduce((n, p) => n + (p.board.holes?.length ?? 0), 0)} ${insertMode === 'heat-set' ? 'heat-set insert' : 'thread-forming'} bosses Ø${pcbBoss.od}/Ø${pcbBoss.hole} × ${bottomClear} mm; ${clearance} mm edge clearance, ${topClear} mm above the tallest component`,
-    `Fasteners: ${nPcb} × M${d}×${pcbLen} PCB screws, ${caseCorners.length} × M${dCase}×${caseL} case screws (cover counterbore Ø${r2(cb.d)} × ${r2(cbDepth)}), ${insertMode === 'heat-set' ? `${fasteners.filter((f) => f.note?.includes('insert')).length} × M${d} heat-set inserts (Ø${ins.od} × ${ins.length})` : 'no inserts'}`,
+    `Fasteners: ${nPcb ? `${nPcb} × M${d}×${pcbLen} PCB screws, ` : ''}${standoffs.length ? `${nStandoff} × M${d} standoffs + ${nStandoff} × M${d}×6 screws (stacked boards), ` : ''}${caseCorners.length} × M${dCase}×${caseL} case screws (cover counterbore Ø${r2(cb.d)} × ${r2(cbDepth)}), ${insertMode === 'heat-set' ? `${nInsert} × M${d} heat-set inserts (Ø${ins.od} × ${ins.length})` : 'no inserts'}`,
   );
   if (sideVents.length) notes.push(`Side-wall vents on ${sideVents.join(', ')} are closed slots → one slide per face in the mold (≈ $1.5k–5k each); pass ventFaces: ['top', 'bottom'] to avoid side actions`);
   if (fasteners.some((f) => !f.partId)) notes.push('Some fastener instances have partId \'\' — pass fastenerPartIds (screw/caseScrew/insert/standoff PartDefs with FastenerSpec) to resolve them');

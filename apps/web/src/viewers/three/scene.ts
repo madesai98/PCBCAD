@@ -156,6 +156,7 @@ export class AssemblyScene {
   private xray = false;
   private section: Assembly3DSection | null = null;
   private plane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0);
+  private sectionSign = 1;
   private sectionHelper: THREE.LineLoop | null = null;
   private caps: { meshes: THREE.Object3D[]; disposables: { dispose(): void }[] } = { meshes: [], disposables: [] };
   private overlay: Assembly3DOverlay = {};
@@ -312,11 +313,19 @@ export class AssemblyScene {
 
   setSection(s: Assembly3DSection | null | undefined) {
     const was = !!this.section;
+    const prevAxis = this.section?.axis;
     this.section = s ?? null;
     if (this.section) {
-      const n = this.section.axis === 'x' ? new THREE.Vector3(-1, 0, 0) : this.section.axis === 'y' ? new THREE.Vector3(0, -1, 0) : new THREE.Vector3(0, 0, -1);
-      this.plane.normal.copy(n);
-      this.plane.constant = this.section.offset;
+      // Remove the half facing the camera (decided when the cut is enabled / its axis changes) so the
+      // capped cut face is visible; moving the offset never flips it.
+      if (!was || prevAxis !== this.section.axis) {
+        const k = this.section.axis === 'x' ? 0 : this.section.axis === 'y' ? 1 : 2;
+        const camSide = this.camera.position.getComponent(k) - this.controls.target.getComponent(k);
+        this.sectionSign = camSide >= 0 ? 1 : -1;
+      }
+      const axisV = this.section.axis === 'x' ? new THREE.Vector3(1, 0, 0) : this.section.axis === 'y' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1);
+      this.plane.normal.copy(axisV).multiplyScalar(-this.sectionSign);
+      this.plane.constant = this.sectionSign * this.section.offset;
     }
     if (was !== !!this.section || this.section) this.applyClipping();
     if (was !== !!this.section) this.rebuildCaps();
@@ -393,7 +402,7 @@ export class AssemblyScene {
     const fov = this.camera.fov * DEG;
     const fitH = sphere.radius / Math.sin(fov / 2);
     const fitW = fitH / Math.max(0.3, Math.min(1, this.camera.aspect));
-    const dist = Math.max(fitH, fitW) * 0.92;
+    const dist = Math.max(fitH, fitW) * 0.8;
     const d = (dir ?? this.camera.position.clone().sub(this.controls.target)).clone();
     if (d.lengthSq() < 1e-9) d.set(0.8, -1.15, 0.85);
     d.normalize();
@@ -853,7 +862,7 @@ export class AssemblyScene {
 
   private applyMaterialModes() {
     const ghostAll = !!this.structural;
-    const ghostMech = this.xray || !!this.airflow;
+    const ghostMech = this.xray || !!this.airflow || !!this.overlay.pcbThermal;
     this.forEachContentMaterial((m, mech) => {
       if (m.userData.base === undefined) m.userData.base = { transparent: m.transparent, opacity: m.opacity, depthWrite: m.depthWrite };
       const base = m.userData.base as { transparent: boolean; opacity: number; depthWrite: boolean };
@@ -911,7 +920,7 @@ export class AssemblyScene {
     const center = box.getCenter(new THREE.Vector3());
     let order = 10;
     for (const n of this.nodes) {
-      const ghost = !!this.structural || ((this.xray || !!this.airflow) && n.kind === 'mech');
+      const ghost = !!this.structural || ((this.xray || !!this.airflow || !!this.overlay.pcbThermal) && n.kind === 'mech');
       if (ghost) continue;
       const meshes: THREE.Mesh[] = [];
       if (n.kind === 'mech') n.content.traverse((o) => (o as THREE.Mesh).isMesh && meshes.push(o as THREE.Mesh));
@@ -1077,9 +1086,9 @@ export class AssemblyScene {
 
   private applyTheme() {
     const t = this.theme;
-    (this.gridMat.uniforms.uColor.value as THREE.Color).set(t.dark ? '#5d6878' : '#8a94a3');
-    (this.gridMat.uniforms.uMajorColor.value as THREE.Color).set(t.dark ? '#8b96a6' : '#6b7584');
-    this.gridMat.uniforms.uOpacity.value = t.dark ? 0.32 : 0.38;
+    (this.gridMat.uniforms.uColor.value as THREE.Color).set(t.dark ? '#5d6878' : '#a7b0bc');
+    (this.gridMat.uniforms.uMajorColor.value as THREE.Color).set(t.dark ? '#8b96a6' : '#8d97a5');
+    this.gridMat.uniforms.uOpacity.value = t.dark ? 0.32 : 0.22;
     (this.ground.material as THREE.ShadowMaterial).opacity = t.dark ? 0.55 : 0.2;
     this.forEachContentMaterial((m) => {
       if (m.userData.edge) (m as THREE.LineBasicMaterial).color.set(t.dark ? '#0b0d10' : '#1f2933');
@@ -1151,7 +1160,7 @@ export class AssemblyScene {
       if (this.section && this.plane.distanceToPoint(h.point) < -1e-6) return false;
       return true;
     });
-    const ghostMech = this.xray || !!this.airflow || !!this.structural;
+    const ghostMech = this.xray || !!this.airflow || !!this.structural || !!this.overlay.pcbThermal;
     if (ghostMech) {
       const nonMech = hits.filter((h) => (h.object.userData.pick as PickData | undefined)?.kind !== 'mech');
       if (nonMech.length) hits = nonMech;
@@ -1290,7 +1299,13 @@ export class AssemblyScene {
     }
     if (Math.abs(this.explodeTarget - this.explodeCur) > 1e-4) {
       this.explodeCur += (this.explodeTarget - this.explodeCur) * Math.min(1, dt * 9);
-      if (Math.abs(this.explodeTarget - this.explodeCur) < 1e-3) this.explodeCur = this.explodeTarget;
+      if (Math.abs(this.explodeTarget - this.explodeCur) < 1e-3) {
+        this.explodeCur = this.explodeTarget;
+        // Keep the whole (exploded) assembly framed unless the user has taken over the camera.
+        this.applyExplode();
+        this.updateBounds();
+        if (!this.userMoved) this.fit(true);
+      }
       this.applyExplode();
       if (this.selectedId) this.updateSelection();
       active = true;

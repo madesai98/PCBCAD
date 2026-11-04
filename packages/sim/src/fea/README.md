@@ -44,8 +44,9 @@ A region that selects no solid voxel throws; so does a model without fixtures.
 * **Solver** – matrix-free element-by-element operator, preconditioned conjugate gradients
   (relative residual `‖r‖/‖f‖ ≤ tolerance`, default 1e-6). Preconditioner: geometric multigrid
   V-cycle with exact Galerkin coarse operators (trilinear prolongation on the voxel-node grid, stored
-  per coarse cell and de-duplicated), clamped DOFs masked out of the transfer, Chebyshev/Jacobi
-  3×3-block smoothing, dense Cholesky on the coarsest level (≤ 900 DOFs).
+  per coarse cell and de-duplicated), clamped DOFs masked out of the transfer, 3×3-block Chebyshev
+  smoothing (degree 1 on the fine level, 4 on the cheap coarse levels), dense Cholesky on the coarsest
+  level (≤ 900 DOFs).
 * **Stress** – σ = D·B·u with the full enhanced strain. Per voxel the reported von Mises is the maximum
   of the centroid value and the values at the centres of its exposed or material-interface faces, so
   the *surface* stress of thin walls is captured (a centroid-only value under-reads a 2-voxel wall in
@@ -90,7 +91,8 @@ shell can be higher. Treat results as ±2× estimates for compact products.
 | axial bar | σ within 2 % of F/A, δ within 3 % of FL/EA |
 | thin plate 60×20×2 mm (2 voxels thick) | δ / beam theory = 0.972 (plate effect ≈ 0.91–1.0) |
 | pressure on a column | σ = p within 2 %, net force = p·A exactly |
-| 42 k-voxel thin-walled ABS enclosure (189 k DOFs) | ~10.5 s, 118 PCG its to 1e-6 (Node 22, 1 core) |
+| 42 k-voxel thin-walled ABS enclosure (189 k DOFs) | ≈ 8.5 s, 78 PCG its to 1e-6 (Node 22, 1 core) |
+| 80 k-voxel solid cantilever (h = 0.5 mm, 265 k DOFs) | ≈ 3.9 s, 17 PCG its |
 
 ## Accuracy limits & known issues
 
@@ -102,5 +104,6 @@ shell can be higher. Treat results as ±2× estimates for compact products.
   they share a voxel face. Weak-plane (knit-line / layer) strength is not checked.
 * Nearly incompressible materials (ν > 0.45, e.g. TPU, silicone) may lock; a warning is emitted.
 * Multigrid efficiency drops for walls only 1–2 voxels thick (the trilinear coarse spaces shear-lock in
-  bending): ~15–30 PCG iterations for bulky parts, ~60–120 for thin-walled enclosures; counts are
-  mesh-independent. A smoothed-aggregation coarse space with rotational modes would fix this.
+  bending): ~15–20 PCG iterations for bulky parts, ~50–80 for thin-walled enclosures; counts are
+  mesh-independent (106 vs 105 iterations at 42 k and 337 k voxels in an earlier configuration).
+  A smoothed-aggregation coarse space with rotational modes would fix this.

@@ -238,18 +238,42 @@ function makeTest(s: LeafSolid): CLeaf['test'] {
     }
     case 'cylinder': {
       const zb = s.center ? -s.h / 2 : 0;
+      const n = segmentsOf(s);
       return (x, y, z) => {
         const t = (z - zb) / s.h;
         if (t < 0 || t >= 1) return false;
         const r = s.r0 + (s.r1 - s.r0) * t;
-        return x * x + y * y <= r * r;
+        return ngonRadius(x, y, n) <= r;
       };
     }
     case 'sphere':
       return (x, y, z) => x * x + y * y + z * z <= s.r * s.r;
-    case 'revolve':
-      return (x, y, z) => pointInPoly(Math.hypot(x, y), z, s.profile);
+    case 'revolve': {
+      const n = segmentsOf(s);
+      return (x, y, z) => pointInPoly(ngonRadius(x, y, n), z, s.profile);
+    }
   }
+}
+
+/** Segment count manifold uses for a cylinder / revolve leaf (same rule in both evaluators). */
+function segmentsOf(s: CylSolid | RevolveSolid): number {
+  if (s.segments != null && s.segments >= 3) return Math.floor(s.segments);
+  const r = s.kind === 'cylinder' ? Math.max(s.r0, s.r1) : Math.max(0, ...s.profile.map((p) => p[0]));
+  return circleSegments(r);
+}
+
+/**
+ * "Radius" of (x, y) w.r.t. a regular n-gon with vertices at angles 2πk/n (manifold's convention):
+ * the point lies inside the n-gon of circumradius R iff ngonRadius ≤ R.
+ */
+function ngonRadius(x: number, y: number, n: number): number {
+  const r = Math.hypot(x, y);
+  if (r === 0) return 0;
+  const step = (2 * Math.PI) / n;
+  let a = Math.atan2(y, x);
+  if (a < 0) a += 2 * Math.PI;
+  const mid = (Math.floor(a / step) + 0.5) * step;
+  return (r * Math.cos(a - mid)) / Math.cos(Math.PI / n);
 }
 
 /** Flatten matrices and precompute world bounding boxes. Returns null for empty solids. */
@@ -727,7 +751,7 @@ export function solidToManifold(s: Solid, w: ManifoldToplevel, arena: Arena): Ma
     }
     case 'cylinder': {
       if (!(s.h > 0) || !(Math.max(s.r0, s.r1) > 0)) return null;
-      man = arena.add(Manifold.cylinder(s.h, Math.max(0, s.r0), Math.max(0, s.r1), s.segments ?? circleSegments(Math.max(s.r0, s.r1)), !!s.center));
+      man = arena.add(Manifold.cylinder(s.h, Math.max(0, s.r0), Math.max(0, s.r1), segmentsOf(s), !!s.center));
       break;
     }
     case 'sphere':
@@ -737,8 +761,7 @@ export function solidToManifold(s: Solid, w: ManifoldToplevel, arena: Arena): Ma
     case 'revolve': {
       if (s.profile.length < 3) return null;
       const cs = arena.add(new CrossSection([s.profile as [number, number][]], 'EvenOdd'));
-      const rmax = Math.max(...s.profile.map((p) => p[0]));
-      man = arena.add(cs.revolve(s.segments ?? circleSegments(rmax)));
+      man = arena.add(cs.revolve(segmentsOf(s)));
       break;
     }
     case 'union': {

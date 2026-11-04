@@ -91,6 +91,7 @@ function transformBB(b: BBox3, m: Mat4): BBox3 {
 }
 
 const CLAMPING = new Set(['screw', 'self-tapping-screw', 'bolt', 'rivet', 'standoff', 'pem-standoff']);
+// note: unresolved fasteners (no spec) count as clamping when they join the board instance
 
 const MATING: Record<string, Vec3> = { '+x': [1, 0, 0], '-x': [-1, 0, 0], '+y': [0, 1, 0], '-y': [0, -1, 0], '+z': [0, 0, 1] };
 
@@ -311,23 +312,19 @@ export function checkAssembly(project: Project, opts: AssemblyCheckOptions = {})
       }
       const label = `mounting hole ${hole.id} of '${b.name}'`;
       const tgt = { boardId: b.id, instanceIds: [it.instance.id] };
-      let supported = false;
-      if (best) {
-        if (best.lat > 0.3) {
-          add('boss-misaligned', 'error', `Boss ${best.bw.boss.id} of '${best.bw.sw.shell.name}' is ${fmt(best.lat)} mm off-axis from ${label} (> 0.3 mm)`, { target: { ...tgt, partId: best.bw.sw.shell.id }, at: p, suggestion: 'Move the boss (or the board) so the axes coincide.' }, `${b.id}-${hole.id}`);
-        } else {
-          supported = true;
-          // seating: boss end face vs nearest board face
-          const gaps = [best.bw.top, best.bw.root].flatMap((e) => [p, pTop].map((q) => Math.abs(v3.dot(v3.sub(q, e), best!.bw.dir))));
-          const seat = Math.min(...gaps);
-          if (seat > 0.5)
-            add('boss-gap', 'warning', `${label} is ${fmt(seat)} mm away from the face of boss ${best.bw.boss.id} — the board is not seated`, { target: tgt, at: p, suggestion: `Set the boss height so its top meets the board (adjust by ${fmt(seat)} mm).` }, `${b.id}-${hole.id}`);
-        }
-      }
-      if (!supported) {
-        const so = fastAxis.find((fa) => (fa.spec?.type === 'standoff' || fa.spec?.type === 'pem-standoff') && Math.abs(v3.dot(fa.dir, nrm)) > 0.98 && lateral(fa.p, p, nrm) <= 0.3);
-        if (so) supported = true;
-        else if (!best) add('hole-unsupported', 'warning', `${label} has no coaxial boss or standoff`, { target: tgt, at: p, suggestion: 'Add a boss/standoff under the hole (autoEnclosure does this) or remove the hole.' }, `${b.id}-${hole.id}`);
+      // standoffs on the axis (spec type, or an unresolved fastener noted as a standoff)
+      const standoff = fastAxis.find(
+        (fa) => (fa.spec ? fa.spec.type === 'standoff' || fa.spec.type === 'pem-standoff' : /standoff/i.test(fa.f.note ?? '')) && Math.abs(v3.dot(fa.dir, nrm)) > 0.98 && lateral(fa.p, p, nrm) <= 0.3,
+      );
+      const seatOf = (bw: BossW) => Math.min(...[bw.top, bw.root].flatMap((e) => [p, pTop].map((q) => Math.abs(v3.dot(v3.sub(q, e), bw.dir)))));
+      if (best && seatOf(best.bw) <= 1.0 && best.lat > 0.3) {
+        add('boss-misaligned', 'error', `Boss ${best.bw.boss.id} of '${best.bw.sw.shell.name}' is ${fmt(best.lat)} mm off-axis from ${label} (> 0.3 mm)`, { target: { ...tgt, partId: best.bw.sw.shell.id }, at: p, suggestion: 'Move the boss (or the board) so the axes coincide.' }, `${b.id}-${hole.id}`);
+      } else if (best && best.lat <= 0.3) {
+        const seat = seatOf(best.bw);
+        if (seat > 0.5 && !standoff)
+          add('boss-gap', 'warning', `${label} is ${fmt(seat)} mm away from the face of boss ${best.bw.boss.id} — the board is not seated`, { target: tgt, at: p, suggestion: `Set the boss height so its top meets the board (adjust by ${fmt(seat)} mm) or add a standoff.` }, `${b.id}-${hole.id}`);
+      } else if (!standoff) {
+        add('hole-unsupported', 'warning', `${label} has no coaxial boss or standoff`, { target: tgt, at: p, suggestion: 'Add a boss/standoff under the hole (autoEnclosure does this) or remove the hole.' }, `${b.id}-${hole.id}`);
       }
       // a fastener that actually clamps the board: joins its instance, or is a screw/bolt/rivet/standoff
       const clamps = (fa: (typeof fastAxis)[number]) => (fa.f.joins ?? []).includes(it.instance.id) || (!!fa.spec && CLAMPING.has(fa.spec.type));

@@ -45,7 +45,7 @@ export interface AirflowSetup {
    * boundary to ambient. Default 10.
    */
   externalH?: number;
-  /** Outer SIMPLE iteration limit (default 1500). */
+  /** Outer SIMPLEC iteration limit (default 1000; converged cases typically need 40–400). */
   maxIterations?: number;
   onProgress?: (fraction: number) => void;
 }

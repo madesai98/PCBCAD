@@ -29,11 +29,11 @@
   color: var(--text-dim);
 }
 .pv-plot .u-legend .u-marker {
-  width: 10px;
-  height: 3px;
-  border-radius: 2px;
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
   margin-right: 6px;
-  border: 0 !important;
+  border-width: 2px !important;
 }
 .pv-plot .u-legend .u-off > * {
   opacity: 0.35;

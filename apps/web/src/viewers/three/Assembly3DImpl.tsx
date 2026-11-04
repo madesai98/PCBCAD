@@ -124,7 +124,7 @@ export default function Assembly3DImpl(props: Assembly3DProps) {
         {s && structural && (
           <FloatPanel className="flex w-[250px] flex-col gap-2 px-2.5 py-2">
             <ColorLegend min={0} max={s.max} unit="MPa" map="turbo" title="von Mises stress" />
-            <div className="grid grid-cols-3 gap-1 font-mono text-[10.5px] text-(--text-dim)">
+            <div className="flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[10.5px] whitespace-nowrap text-(--text-dim)">
               <span>
                 σ<sub>max</sub> <span className="text-(--text)">{fmtQuantity(structural.maxVonMises, 'MPa', 3)}</span>
               </span>

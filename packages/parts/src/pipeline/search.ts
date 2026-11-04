@@ -16,11 +16,16 @@ export function matchScore(hit: Pick<PartSearchHit, 'lcsc' | 'mpn'>, query: stri
   return 0;
 }
 
-/** Stable ranking: exact matches first, then in-stock before out-of-stock, distributor order otherwise. */
+const LIB_RANK: Record<string, number> = { basic: 2, preferred: 1 };
+
+/**
+ * Stable ranking: exact LCSC/MPN matches first, then in-stock before out-of-stock, then JLCPCB
+ * basic / preferred library parts (no assembly setup fee), distributor relevance order otherwise.
+ */
 export function rankHits(hits: PartSearchHit[], query: string): PartSearchHit[] {
   return hits
-    .map((h, i) => ({ h, i, m: matchScore(h, query), s: h.stock > 0 ? 1 : 0 }))
-    .sort((a, b) => b.m - a.m || b.s - a.s || a.i - b.i)
+    .map((h, i) => ({ h, i, m: matchScore(h, query), s: h.stock > 0 ? 1 : 0, l: LIB_RANK[h.libraryType ?? ''] ?? 0 }))
+    .sort((a, b) => b.m - a.m || b.s - a.s || b.l - a.l || a.i - b.i)
     .map((x) => x.h);
 }
 

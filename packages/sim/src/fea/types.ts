@@ -46,6 +46,13 @@ export interface StructuralSetup {
    * accelerates with A, pass −A.
    */
   bodyAcceleration?: Vec3;
+  /**
+   * Where voxel stresses are sampled: 'surface' (default) = max of the centroid value and the values at
+   * the centres of the voxel's exposed / material-interface faces (captures the bending surface stress of
+   * thin walls); 'centroid' = centroid only (smoother, but under-reads the surface stress of a 2-voxel
+   * wall in bending by ~50 %).
+   */
+  stressSampling?: 'surface' | 'centroid';
   /** PCG iteration limit per solid body (default 1000). */
   maxIterations?: number;
   /** Relative residual ‖r‖₂/‖f‖₂ to reach (default 1e-6). */

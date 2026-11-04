@@ -398,7 +398,7 @@ export function PcbView(props: PcbViewProps) {
     const { width, height } = sizeRef.current;
     if (e.key === 'f' || e.key === 'F') fit(true);
     else if (e.key === 'b' || e.key === 'B') flip();
-    else if (e.key === 'm' || e.key === 'M') setMode(mode === 'realistic' ? 'layers' : 'realistic');
+    else if ((e.key === 'm' || e.key === 'M') && showModeSwitch) setMode(mode === 'realistic' ? 'layers' : 'realistic');
     else if (e.key === '+' || e.key === '=') pzRef.current?.zoomAt(width / 2, height / 2, 1.4);
     else if (e.key === '-' || e.key === '_') pzRef.current?.zoomAt(width / 2, height / 2, 1 / 1.4);
     else return;
@@ -420,6 +420,8 @@ export function PcbView(props: PcbViewProps) {
     holes: theme.textDim,
     ratsnest: theme.text,
   };
+  // A host that controls `mode` without listening for changes has its own switch.
+  const showModeSwitch = props.mode === undefined || !!props.onModeChange;
   const layerRows = LAYER_LABELS.filter((l) => l.key !== 'inner' || (board.stackup?.layers ?? 2) > 2);
   const errors = issueMarkers.filter((m) => m.severity === 'error').length;
   const warnings = issueMarkers.filter((m) => m.severity === 'warning').length;
@@ -437,6 +439,8 @@ export function PcbView(props: PcbViewProps) {
       {toolbar && (
         <div className="pointer-events-none absolute inset-x-2 top-2 flex flex-wrap items-start gap-1.5">
           <FloatPanel className="flex items-center gap-0.5 p-1">
+            {showModeSwitch && (
+              <>
             <Segmented
               value={mode}
               onChange={setMode}
@@ -446,6 +450,8 @@ export function PcbView(props: PcbViewProps) {
               ]}
             />
             <ToolDivider />
+              </>
+            )}
             <Popover
               trigger={(open, toggle) => (
                 <ToolButton title="Layer visibility" active={open} onClick={toggle}>

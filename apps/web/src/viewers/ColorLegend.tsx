@@ -26,8 +26,16 @@ export function ColorLegend({ min, max, unit, map, title, orientation = 'horizon
   const lo = Number.isFinite(min) ? min : 0;
   const hi = Number.isFinite(max) && max > lo ? max : lo + 1;
   const tickValues = useMemo(() => {
-    const t = niceTicks(lo, hi, ticks).filter((v) => v > lo + (hi - lo) * 0.06 && v < hi - (hi - lo) * 0.06);
-    return [lo, ...t, hi];
+    // Interior nice ticks, kept clear of the end labels and of each other.
+    const span = hi - lo;
+    const inner: number[] = [];
+    for (const v of niceTicks(lo, hi, ticks)) {
+      const f = (v - lo) / span;
+      if (f < 0.2 || f > 0.8) continue;
+      if (inner.length && (v - inner[inner.length - 1]) / span < 0.18) continue;
+      inner.push(v);
+    }
+    return [lo, ...inner, hi];
   }, [lo, hi, ticks]);
   const pos = (v: number) => ((v - lo) / (hi - lo)) * 100;
   const label = (v: number) => fmtQuantity(v, unit, 3).replace(` ${unit}`, '');
@@ -42,9 +50,9 @@ export function ColorLegend({ min, max, unit, map, title, orientation = 'horizon
               <div className="absolute -right-1 -left-1 h-0.5 bg-(--text)" style={{ bottom: `${Math.max(0, Math.min(100, pos(marker.value)))}%` }} />
             )}
           </div>
-          <div className="relative w-12 font-mono text-[10px] tabular-nums">
+          <div className="relative w-12 font-mono text-[10px] leading-none tabular-nums">
             {tickValues.map((v, i) => (
-              <span key={i} className="absolute left-0 -translate-y-1/2 whitespace-nowrap" style={{ bottom: `${pos(v)}%`, transform: 'translateY(50%)' }}>
+              <span key={i} className="absolute left-0 whitespace-nowrap" style={{ bottom: `${pos(v)}%`, transform: i === 0 ? 'none' : i === tickValues.length - 1 ? 'translateY(100%)' : 'translateY(50%)' }}>
                 {label(v)}
               </span>
             ))}

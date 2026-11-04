@@ -3,8 +3,9 @@
  *
  * Modelling choices (documented contract for the CFD solver):
  *  - Domain: union bbox of all enclosure shells in the assembly frame plus ONE cell of padding on
- *    every side (so the outer wall surfaces are resolved and every opening touches outside air).
- *    Without shells the domain is the bbox of all instances (with a warning).
+ *    every side (so the outer wall surfaces are resolved and every opening touches outside air);
+ *    `ambientLayer: false` drops the padding so the walls form the domain boundary. Without shells
+ *    the domain is the bbox of all instances (with a warning).
  *  - cells: 0 = air; v ≥ 1 solid with properties materials[v − 1] (EffectiveMaterial, i.e. already
  *    process-adjusted). Shell walls use effectiveMaterial(materialId, process, processOptions);
  *    boards are FR-4 slabs (stackup.dielectric) of their outline; component bodies are
@@ -66,6 +67,13 @@ export interface AirflowOptions {
    * true). false = enclosure and mechanical parts only (empty-enclosure studies).
    */
   boardMeshesFallback?: boolean;
+  /**
+   * true (default): one cell of ambient air around the shells (walls exchange heat with the
+   * 'ambient' opening cells). false: domain = shell bbox exactly, so wall cells form the domain
+   * boundary (use the solver's external convection coefficient); only the dead air around rounded
+   * corners is listed as 'ambient'.
+   */
+  ambientLayer?: boolean;
 }
 
 function stadiumArea(w: number, l: number): number {
@@ -107,7 +115,7 @@ export async function voxelizeAssemblyForAirflow(project: Project, opts: Airflow
   const bb = bbUnion(bbs);
   const maxDim = Math.max(bb.max[0] - bb.min[0], bb.max[1] - bb.min[1], bb.max[2] - bb.min[2]);
   const h = opts.h && opts.h > 0 ? opts.h : Math.max(1, maxDim / 60);
-  const g: GridSpec = gridForBBox(bb, h, 1);
+  const g: GridSpec = gridForBBox(bb, h, opts.ambientLayer === false ? 0 : 1);
   const N = g.nx * g.ny * g.nz;
   if (N > 60_000_000) throw new Error(`voxelizeAssemblyForAirflow: ${N} cells — increase h`);
   const cells = new Uint8Array(N);

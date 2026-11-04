@@ -448,6 +448,7 @@ export function analyzeStructure(setup: StructuralSetup): StructuralAnalysis {
   let maxNodeDisp = 0;
   const progress = setup.onProgress;
   const logTol = Math.log(tol);
+  const nPts = setup.stressSampling === 'centroid' ? 1 : 7;
   const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
   const timing = { setupMs: 0, solveMs: 0, recoveryMs: 0 };
 
@@ -611,7 +612,7 @@ export function analyzeStructure(setup: StructuralSetup): StructuralAnalysis {
       const mat = solid[v];
       let best = -1;
       let bestP = 0;
-      for (let p = 0; p < 7; p++) {
+      for (let p = 0; p < nPts; p++) {
         if (p > 0) {
           // only faces on the surface or on a material interface
           const dir = p - 1;

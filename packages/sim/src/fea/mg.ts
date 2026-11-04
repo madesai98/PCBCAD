@@ -9,14 +9,15 @@
  * which keeps memory small for the repetitive patterns of voxel models. Clamped fine DOFs are handled by
  * masking the prolongation (P := Z P); coarse nodes that only feed clamped/void DOFs become inactive.
  *
- * Smoother: Chebyshev polynomial (default degree 1, i.e. optimally damped Jacobi) in the 3×3-block-Jacobi-preconditioned operator
- * D⁻¹A, targeting [λmax/30, 1.1·λmax] with λmax from a power iteration on each level (damped block
- * Jacobi is available as an option). Pre- and post-smoothers are identical polynomials, so the V-cycle is
- * a symmetric positive definite preconditioner for PCG.
+ * Smoother: Chebyshev polynomial in the 3×3-block-Jacobi-preconditioned operator D⁻¹A, targeting
+ * [λmax/30, 1.1·λmax] with λmax from a power iteration on each level — degree 1 (optimally damped Jacobi)
+ * on the expensive fine level, degree 4 on the cheap coarse levels (damped block Jacobi is available as an
+ * option). Pre- and post-smoothers are identical polynomials, so the V-cycle is a symmetric positive
+ * definite preconditioner for PCG.
  * Coarsest level: dense Cholesky on the active DOFs (with a pivot guard for semi-definite blocks).
  *
  * Known limitation: for walls only 1–2 voxels thick the trilinear coarse spaces shear-lock in bending, so
- * iteration counts rise from ~12–20 (bulky parts) to ~60–100 (thin-walled enclosures). Counts stay
+ * iteration counts rise from ~15–20 (bulky parts) to ~50–80 (thin-walled enclosures). Counts stay
  * mesh-independent. A smoothed-aggregation coarse space with rotational modes would remove this.
  */
 
@@ -440,6 +441,8 @@ export interface MgOptions {
   maxLevels?: number;
   /** Smoothing steps (Jacobi) or polynomial degree (Chebyshev) per side (default 1: fastest overall). */
   smoothSteps?: number;
+  /** Smoothing steps / Chebyshev degree on the coarse levels (default 4; coarse levels are cheap). */
+  coarseSmoothSteps?: number;
   /** Smoother type (default 'chebyshev'). */
   smoother?: 'jacobi' | 'chebyshev';
   /** Damped Jacobi: ω = omegaFactor / λmax (default 1.3). */
@@ -460,6 +463,7 @@ export class ElasticMultigrid {
   private coarseNull!: Uint8Array;
   private coarseY!: Float64Array;
   private readonly smooth: number;
+  private readonly smoothCoarse: number;
   private readonly cheby: boolean;
   private readonly chebyRatio: number;
   private readonly lamMax: number[] = [];
@@ -471,6 +475,7 @@ export class ElasticMultigrid {
     const maxCoarse = opts.maxCoarseDofs ?? 900;
     const maxLevels = opts.maxLevels ?? 12;
     this.smooth = Math.max(1, opts.smoothSteps ?? 1);
+    this.smoothCoarse = Math.max(1, opts.coarseSmoothSteps ?? 4);
     this.cheby = (opts.smoother ?? 'chebyshev') === 'chebyshev';
     this.chebyRatio = opts.chebyRatio ?? 30;
     const omegaFactor = opts.omegaFactor ?? 1.3;
@@ -554,7 +559,7 @@ export class ElasticMultigrid {
       this.chebyshev(l, b, x, true);
     } else {
       applyDiagInv(L, b, x, L.omega);
-      for (let s = 1; s < this.smooth; s++) this.jacobiStep(L, b, x);
+      for (let s = 1; s < (l === 0 ? this.smooth : this.smoothCoarse); s++) this.jacobiStep(L, b, x);
     }
     // residual
     applyLevel(L, x, r);
@@ -605,7 +610,7 @@ export class ElasticMultigrid {
       x[3 * nd + 2] += a2;
     }
     if (this.cheby) this.chebyshev(l, b, x, false);
-    else for (let s = 0; s < this.smooth; s++) this.jacobiStep(L, b, x);
+    else for (let s = 0; s < (l === 0 ? this.smooth : this.smoothCoarse); s++) this.jacobiStep(L, b, x);
   }
 
   /**
@@ -632,9 +637,10 @@ export class ElasticMultigrid {
     const q = this.qWork[l];
     const inv = L.diagInv;
     const free = L.free;
-    for (let k = 0; k < this.smooth; k++) {
+    const deg = l === 0 ? this.smooth : this.smoothCoarse;
+    for (let k = 0; k < deg; k++) {
       for (let i = 0; i < n; i++) x[i] += d[i];
-      if (k === this.smooth - 1) break;
+      if (k === deg - 1) break;
       applyLevel(L, d, q);
       for (let i = 0; i < n; i++) r[i] -= q[i];
       const rhoNew = 1 / (2 * sigma - rho);

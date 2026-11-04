@@ -211,14 +211,6 @@ export function Gallery() {
           actions={
             <>
               <Segmented
-                value={pcbMode}
-                onChange={setPcbMode}
-                options={[
-                  { value: 'realistic', label: 'Realistic' },
-                  { value: 'layers', label: 'Layers' },
-                ]}
-              />
-              <Segmented
                 value={pcbOverlay}
                 onChange={setPcbOverlay}
                 options={[

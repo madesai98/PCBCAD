@@ -18,11 +18,23 @@ function normalise(v: string): string {
     .trim();
 }
 
+/** Round to 9 significant digits to remove binary floating-point noise (0.14200000000000002 → 0.142). */
+function sig(v: number | undefined): number | undefined {
+  return v === undefined || !Number.isFinite(v) || v === 0 ? v : Number(v.toPrecision(9));
+}
+
 /** Parse one scalar token ('±12V', '+85°C', '100,000', '≤5mA') with core parseValue. */
 export function parseScalar(token: string): number | undefined {
+  return sig(parseScalarRaw(token));
+}
+
+function parseScalarRaw(token: string): number | undefined {
   let t = token.trim().replace(/^[±+≤≥<>~≈]+/, '').replace(/^\(|\)$/g, '');
   if (/^\d{1,3}(,\d{3})+(\.\d+)?/.test(t)) t = t.replace(/,(?=\d{3})/g, '');
   if (!t) return undefined;
+  // lengths are millimetres: '2.54mm' → 2.54 (not 2.54 milli-units)
+  const mm = /^([-+]?\d*\.?\d+)\s*mm$/i.exec(t);
+  if (mm) return parseFloat(mm[1]);
   const v = parseValue(t);
   if (v !== undefined) return v;
   // tolerate trailing words: '3.3V Fixed' → '3.3V'
@@ -46,7 +58,7 @@ export function parseQuantity(value: string | undefined, mode: QuantityMode = 'f
     if (a !== undefined && b !== undefined) {
       if (mode === 'min') return Math.min(a, b);
       if (mode === 'max') return Math.max(a, b);
-      if (mode === 'mid') return (a + b) / 2;
+      if (mode === 'mid') return sig((a + b) / 2);
       return a;
     }
     return a ?? b;

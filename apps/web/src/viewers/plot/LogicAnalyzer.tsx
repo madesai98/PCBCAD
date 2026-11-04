@@ -101,8 +101,12 @@ export function LogicAnalyzer({ result, showAnalog = true, className }: LogicAna
       ctx.moveTo(x, RULER - 6);
       ctx.lineTo(x, H);
       ctx.stroke();
+      const label = fmtTime(Math.abs(t) < step * 1e-6 ? 0 : t, 3);
+      const w = ctx.measureText(label).width;
+      // Keep tick labels inside the waveform area.
+      const lx = Math.min(width - w / 2 - 4, Math.max(lw + w / 2 + 4, x));
       ctx.fillStyle = th.textDim;
-      ctx.fillText(fmtTime(Math.abs(t) < step * 1e-6 ? 0 : t, 3), x, RULER / 2 - 1);
+      ctx.fillText(label, lx, RULER / 2 - 1);
     }
     ctx.strokeStyle = th.border;
     ctx.beginPath();
@@ -345,12 +349,11 @@ export function LogicAnalyzer({ result, showAnalog = true, className }: LogicAna
           <div ref={laneRef} className="relative cursor-crosshair" style={{ height }}>
             <canvas ref={canvasRef} className="block w-full" style={{ height }} />
           </div>
-          <div className="pointer-events-none absolute top-0.5 right-1">
-            <div className="pointer-events-auto" data-pz-ignore="">
-              <ToolButton title="Fit time range (double-click)" onClick={() => pzRef.current?.animateTo(fitView())}>
-                <Maximize2 className="h-3.5 w-3.5" />
-              </ToolButton>
-            </div>
+          <div className="absolute top-0 left-1 flex h-[26px] items-center" data-pz-ignore="">
+            <ToolButton title="Fit time range (double-click)" onClick={() => pzRef.current?.animateTo(fitView())} className="h-6 min-w-6">
+              <Maximize2 className="h-3.5 w-3.5" />
+            </ToolButton>
+            <span className="ml-1 text-[10.5px] font-medium tracking-wide text-(--text-dim) uppercase">{lanes.length} signals</span>
           </div>
         </div>
       )}

@@ -281,7 +281,7 @@ export function buildSatelliteBoard(parts: Record<string, PartDef>): Board {
     [26.5, 3.5],
   ].map(([x, y], i) => ({ id: `hole_sat_${i + 1}`, x, y, drill: 2.7, plated: false, fastenerPartId: 'fst-standoff-m25' }));
   routeStats.sat = routeBoard(board, parts, { wideNets: new Set([byName.get('+3V3')!]), pourNet: gnd });
-  board.zones = [pour(board, gnd, 'bottom')];
+  board.zones = [pour(board, gnd, 'top'), pour(board, gnd, 'bottom')];
   return board;
 }
 

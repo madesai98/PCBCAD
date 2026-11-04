@@ -41,6 +41,8 @@ export const airflowTuning: {
   /** Normalised momentum and continuity residuals accepted at convergence. */
   momTol: number;
   massTol: number;
+  /** Relative energy-balance error |input − vents − walls| / input accepted at convergence. */
+  balanceTol: number;
   trace?: (it: Record<string, number>) => void;
 } = {
   alphaU: 0.7,
@@ -54,6 +56,7 @@ export const airflowTuning: {
   driftTol: 1e-3,
   momTol: 1e-4,
   massTol: 1e-4,
+  balanceTol: 0.01,
 };
 
 /** Dry-air properties at 1 atm and temperature Tc (°C): kg/m³, Pa·s, W/mK, J/kgK, 1/K. */
@@ -137,7 +140,7 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
   if (!gvec.every((x) => Number.isFinite(x))) throw new Error('airflow: gravity must be a finite Vec3');
   const hExt = setup.externalH ?? 10;
   if (!(hExt >= 0)) throw new Error('airflow: externalH must be ≥ 0');
-  const maxIt = Math.max(1, Math.floor(setup.maxIterations ?? 1500));
+  const maxIt = Math.max(1, Math.floor(setup.maxIterations ?? 1000));
   const air = airProperties(Tamb);
   const rho = air.density;
   const cp = air.specificHeat;
@@ -501,8 +504,19 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
       gExt[c] = (nb * A) / (1 / hExt + hm / 2 / kCell[c]);
       boundarySolid++;
     }
+  // opening cells exchange with ambient through a virtual face: half a cell of still air in parallel
+  // with the advective exchange (hybrid differencing → pure conduction without flow, pure upwind with flow)
+  const gOpen = new Float64Array(N);
   let hasOpen = false;
-  for (let c = 0; c < N && !hasOpen; c++) if (type[c] === OPEN) hasOpen = true;
+  for (let c = 0; c < N; c++) {
+    if (type[c] !== OPEN) continue;
+    hasOpen = true;
+    const i = cellCoords[3 * c];
+    const j = cellCoords[3 * c + 1];
+    const k = cellCoords[3 * c + 2];
+    const nb = (i === 0 ? 1 : 0) + (i === nx - 1 ? 1 : 0) + (j === 0 ? 1 : 0) + (j === ny - 1 ? 1 : 0) + (k === 0 ? 1 : 0) + (k === nz - 1 ? 1 : 0);
+    gOpen[c] = (Math.max(nb, 1) * kAir * A) / (hm / 2);
+  }
   if (input !== 0 && boundarySolid === 0 && !hasOpen)
     throw new Error(
       'airflow: no heat path to ambient — the model needs openings or solid cells on the domain boundary (with externalH > 0).',
@@ -559,13 +573,15 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
     for (let c = 0; c < N; c++) {
       let d = gExt[c];
       let rhs = qCell[c] + gExt[c] * Tamb;
-      if (withFlow) {
-        const out = imb[c] * cp; // W/K of net advective outflow through the cell's faces
-        if (type[c] === OPEN) {
-          if (out < 0) d -= out; // air from the interior leaves to ambient at T_cell
-          else rhs += out * Tamb; // ambient air enters at T_amb
-        } else if (type[c] === FLUID && out < 0) d -= out; // stabilise an unconverged continuity error
-      }
+      const out = withFlow ? imb[c] * cp : 0; // W/K of net advective outflow through the cell's faces
+      if (type[c] === OPEN) {
+        // virtual ambient face: Fa > 0 = air leaving to ambient at T_cell, Fa < 0 = ambient air entering
+        const Fa = -out;
+        const G = gOpen[c];
+        const a = Math.max(-Fa, G - 0.5 * Fa, 0);
+        d += a + Fa;
+        rhs += a * Tamb;
+      } else if (type[c] === FLUID && out < 0) d -= out; // stabilise an unconverged continuity error
       const di = Ae.diag[c];
       val[di] += d;
       if (val[di] === 0) val[di] = 1e-12;
@@ -582,7 +598,7 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
     if (cycles > 0) amgE.iterate(be, T, cycles);
     else {
       const r = bicgstab(Ae, be, T, amgE, tol, maxIter, kwE);
-      if (!r.converged) amgE.iterate(be, T, maxIter);
+      if (!r.converged) amgE.iterate(be, T, Math.min(maxIter, 30)); // robust (monotone) fallback
     }
     let dTmax = 0;
     for (let c = 0; c < N; c++) {
@@ -607,12 +623,13 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
       if (type[c] !== OPEN) continue;
       const mIn = -imb[c]; // kg/s arriving from the interior (leaves to ambient)
       const o = openOf[c];
-      if (mIn > 0) {
-        const qv = mIn * cp * (T[c] - Tamb);
-        vents += qv;
-        ventByOpening[o] += qv;
-        outM[o] += mIn / rho;
-      } else inM[o] += -mIn / rho;
+      const Fa = mIn * cp;
+      const a = Math.max(-Fa, gOpen[c] - 0.5 * Fa, 0);
+      const qv = (a + Fa) * (T[c] - Tamb); // heat carried/conducted to ambient, relative to T_amb
+      vents += qv;
+      ventByOpening[o] += qv;
+      if (mIn > 0) outM[o] += mIn / rho;
+      else inM[o] += -mIn / rho;
     }
     return { vents, walls, ventByOpening, inM, outM };
   }
@@ -769,6 +786,8 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
   let resMom = 0;
   let resMass = 0;
   let calm = 0;
+  let balErr = 0;
+  let progressFrac = 0;
   const dTHist: number[] = [];
   const progress = setup.onProgress;
   if (hasFlow) {
@@ -805,10 +824,20 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
         if (dTrel < 1e-7) drift = dTrel;
       }
       const tinyFlow = massScale < 1e-14;
-      const ok = (tinyFlow || (resMom < tun.momTol && resMass < tun.massTol)) && drift < tun.driftTol;
+      let ok = (tinyFlow || (resMom < tun.momTol && resMass < tun.massTol)) && drift < tun.driftTol;
+      if (ok && input !== 0) {
+        // energy balance of the current iterate (before the final conservative projection)
+        const hbIt = heatBalance();
+        balErr = Math.abs(input - hbIt.vents - hbIt.walls) / Math.abs(input);
+        ok = balErr < tun.balanceTol;
+      }
       calm = ok ? calm + 1 : 0;
       tun.trace?.({ it, resMom, resMass, dTrel, drift, Tmax, pcgIts });
-      if (progress && it % 5 === 0) progress(Math.min(0.95, Math.max(it / maxIt, Math.min(1, -Math.log10(Math.max(drift, 1e-12)) / 3))));
+      if (progress && it % 5 === 0) {
+        // monotone estimate: iteration budget used or convergence of the temperature drift
+        progressFrac = Math.max(progressFrac, Math.min(0.95, Math.max(it / maxIt, Math.min(1, -Math.log10(Math.max(drift, 1e-12)) / 3))));
+        progress(progressFrac);
+      }
       if (calm >= 3 && it >= 10) {
         converged = true;
         break;
@@ -828,7 +857,7 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
   for (let c = 0; c < N; c++) if (type[c] === FLUID) finalMass += Math.abs(imb[c]);
   for (const F of axes) for (let q = 0; q < F.live.length; q++) finalFlux += rhoA * Math.abs(F.vel[F.live[q]]);
   const hb = heatBalance();
-  const balErr = Math.abs(input - hb.vents - hb.walls) / Math.max(Math.abs(input), 1e-9);
+  balErr = Math.abs(input - hb.vents - hb.walls) / Math.max(Math.abs(input), 1e-9);
   progress?.(1);
 
   /* --------------------------------------------- outputs --------------------------------------------- */

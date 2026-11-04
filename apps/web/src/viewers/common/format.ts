@@ -6,6 +6,8 @@ const NO_PREFIX = new Set(['°C', 'C', 'K', '%', 'dB', '', 'x', '×', '°', 'g',
 /** Format a measured quantity for display: SI prefixes where they make sense, fixed decimals otherwise. */
 export function fmtQuantity(value: number, unit: string, digits = 3): string {
   if (!Number.isFinite(value)) return `— ${unit}`.trim();
+  if (value === 0) return unit ? `0 ${unit}` : '0';
+  if (!unit && Number.isInteger(value)) return String(value);
   if (NO_PREFIX.has(unit)) {
     const abs = Math.abs(value);
     const d = abs >= 1000 ? 0 : abs >= 100 ? 1 : abs >= 10 ? 1 : abs >= 1 ? 2 : abs >= 0.01 ? 3 : 4;

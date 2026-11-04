@@ -41,7 +41,7 @@ function positionsOf(part: PartDef): number | undefined {
   const mpn = part.mpn.toUpperCase();
   let m = /^(?:B|S|SM|BM)(\d{1,2})B-/.exec(mpn) ?? /^(?:PHR|XHP|SHR|ZHR|GHR)-(\d{1,2})/.exec(mpn);
   if (m) return parseInt(m[1], 10);
-  const holes = paramText(part.params, /holes structure|pin structure|configuration/i);
+  const holes = paramText(part.params, /holes? structure|pins? structure|configuration/i);
   m = holes ? /(\d)\s*[xX*]\s*(\d{1,3})/.exec(holes) : null;
   if (m) return parseInt(m[1], 10) * parseInt(m[2], 10);
   const perRow = paramNumber(part.params, [/number of pins per row/i]);
@@ -243,7 +243,7 @@ export function inferConnectorSpec(part: PartDef): ConnectorSpec | undefined {
   }
 
   // datasheet parameters override series defaults
-  current = paramNumber(part.params, [/current rating|rated current|contact current|^current\b/i]) ?? current;
+  if (family !== 'USB-C' && family !== 'USB-Micro-B') current = paramNumber(part.params, [/^current rating(?!-power)|rated current|contact current|^current\b/i]) ?? current;
   voltage = paramNumber(part.params, [/voltage rating|rated voltage|^voltage\b/i]) ?? voltage;
   contactR = paramNumber(part.params, [/contact resistance/i]) ?? contactR;
   cycles = paramNumber(part.params, [/mating cycles|durability|mechanical life|insertion/i]) ?? cycles;

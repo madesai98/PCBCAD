@@ -1,6 +1,6 @@
 import type { PartDef } from '@pcbcad/core';
 import { CHIP_SIZES, completeSpec } from '../package/defaults';
-import { paramNumber, paramText, parseTempRange } from './params';
+import { findParam, paramNumber, paramText, parseQuantity, parseTempRange } from './params';
 
 /* --------------------------------------------------------------------------------------------- *
  * Thermal defaults. θJA values are typical JEDEC-board (2s2p-like, modest copper) figures for the
@@ -23,7 +23,8 @@ function familyThermal(part: PartDef): Thermal | undefined {
   const area = (s.bodyW ?? 3) * (s.bodyL ?? 3);
   switch (s.family) {
     case 'chip': {
-      const P = paramNumber(part.params, [/^power\b|power \(watts\)|power rating|rated power/i]) ?? CHIP_POWER[s.size ?? '0805'] ?? 0.125;
+      const pw = findParam(part.params, /^power$|^power\s*\((watts|w)\)|^power rating|^rated power/i);
+      const P = (pw && /\d\s*[mµu]?W\b/i.test(pw.value) ? parseQuantity(pw.value) : undefined) ?? CHIP_POWER[s.size ?? '0805'] ?? 0.125;
       const tj = part.category === 'resistor' ? 155 : 125;
       return { thetaJA: Math.round((tj - 70) / P), tjMax: tj };
     }

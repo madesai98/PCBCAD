@@ -443,9 +443,9 @@ export function demoMixed(board: Board): MixedSignalResult {
     time[i] = t;
     const buzzing = t > 1.42 && t < 1.62;
     const ledOn = Math.floor(t / 0.25) % 2 === 1;
-    const load = 0.0135 + (ledOn ? 0.0042 : 0) + (buzzing ? 0.17 : 0) + 0.0006 * Math.sin(t * 900);
+    const load = 0.0135 + (ledOn ? 0.0042 : 0) + (buzzing ? 0.17 : 0) + 0.0004 * Math.sin(2 * Math.PI * 1.7 * t);
     i33[i] = load;
-    v33[i] = 3.3 - load * 0.09 + 0.002 * Math.sin(t * 3100);
+    v33[i] = 3.3 - load * 0.09 + 0.0012 * Math.sin(2 * Math.PI * 2.3 * t) + (buzzing ? 0.004 * Math.sin(2 * Math.PI * 41 * t) : 0);
   }
   return {
     kind: 'mixed-signal',

@@ -101,6 +101,21 @@ describe('solveStructural — basic load cases', () => {
     expect(r.maxVonMises / sigma).toBeLessThan(1.15);
   });
 
+  it("stressSampling 'centroid' reads mid-depth stress (≈ ½ the surface stress of a 2-voxel plate)", () => {
+    const setup: StructuralSetup = {
+      grid: blockGrid(60, 20, 2, 1),
+      materials: [steel],
+      fixtures: [{ kind: 'plane', axis: 'x', side: 'min' }],
+      loads: [{ region: { kind: 'plane', axis: 'x', side: 'max' }, force: [0, 0, -1] }],
+    };
+    const surface = solveStructural(setup, meta);
+    const centroid = solveStructural({ ...setup, stressSampling: 'centroid' }, meta);
+    expect(centroid.maxDisplacement).toBeCloseTo(surface.maxDisplacement, 12);
+    const ratio = centroid.maxVonMises / surface.maxVonMises;
+    expect(ratio).toBeGreaterThan(0.4);
+    expect(ratio).toBeLessThan(0.65);
+  });
+
   it('pressure load: total force p·A, uniform compression σ = p', () => {
     const grid = blockGrid(10, 10, 20, 1);
     const p = 2;

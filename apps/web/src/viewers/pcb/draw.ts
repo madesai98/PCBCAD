@@ -594,7 +594,7 @@ export function drawPcb(ctx: CanvasRenderingContext2D, scene: PcbScene, vp: PcbV
     for (const l of order) {
       if (!layerOn(l)) continue;
       const col = lp.copper[l];
-      if (L.zones) drawZones(ctx, scene, vp, st, l, col, l === facing ? 0.2 : 0.12);
+      if (L.zones) drawZones(ctx, scene, vp, st, l, col, theme.dark ? (l === facing ? 0.2 : 0.12) : l === facing ? 0.11 : 0.06);
       strokeGroups(ctx, scene.copper[l]?.traceGroups ?? [], col, 0, 0, scale);
       if (l === 'top' || l === 'bottom') {
         ctx.fillStyle = lp.pad[l];

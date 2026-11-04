@@ -388,10 +388,30 @@ export function inferSimModel(part: PartDef): PartSimModel | undefined {
   }
 }
 
+/** Typical average supply current when the distributor data has none (A). */
+const DEFAULT_ICC: Partial<Record<PartDef['category'], number>> = {
+  'rf-module': 0.08,
+  module: 0.02,
+  interface: 0.005,
+  driver: 0.002,
+  memory: 0.002,
+  sensor: 0.001,
+  oscillator: 0.005,
+  logic: 1e-4,
+  comparator: 1e-4,
+  opamp: 5e-4,
+  ic: 0.002,
+};
+
+/** Supply current from the distributor parameters (A), if present. */
+export function iccFromParams(params: Record<string, string> | undefined): number | undefined {
+  return paramNumber(params, ICC_PARAMS);
+}
+
 function genericIc(part: PartDef): PartSimModel | undefined {
   const { supply, ground } = supplyAndGround(part);
   if (!supply.length || !ground.length) return undefined;
-  const Icc = paramNumber(part.params, ICC_PARAMS) ?? 1e-3;
+  const Icc = iccFromParams(part.params) ?? DEFAULT_ICC[part.category] ?? 1e-3;
   return { kind: 'ic', supplyPins: supply, groundPins: ground, Icc };
 }
 

@@ -227,6 +227,10 @@ describe('voxelizeAssemblyForAirflow', () => {
     expect(d.fans[0].direction[0]).toBeCloseTo(1, 6);
     expect(d.fans[0].cells.length).toBeGreaterThan(100);
     expect(d.inside.length).toBe(g.cells.length);
+    // walls as the domain boundary
+    const tight = await voxelizeAssemblyForAirflow(project, { h: 1, ambientLayer: false });
+    expect(tight.grid.nx).toBe(g.nx - 2);
+    expect(tight.openings.slice(1).every((o) => o.cells.length > 0)).toBe(true);
     // default resolution
     const d2 = await voxelizeAssemblyForAirflow(project);
     expect(d2.grid.h).toBeCloseTo(Math.max(1, 89 / 60), 0);

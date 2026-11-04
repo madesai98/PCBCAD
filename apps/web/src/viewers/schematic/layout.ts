@@ -234,8 +234,11 @@ export function layoutSchematic(project: Project, board: Board, measure: Measure
     const part = parts[c.partId];
     return (part?.pins?.length ?? 0) > 0 || Object.keys(c.pinNets).length > 0;
   });
-  const positioned = comps.filter((c) => c.schematic);
-  const auto = comps.filter((c) => !c.schematic);
+  // explicit positions only when real coordinates were given (older projects stored a functional
+  // group as schematic {x:0, y:0, group}, which must not pin every symbol to the origin)
+  const isPositioned = (c: (typeof comps)[number]) => !!c.schematic && Number.isFinite(c.schematic.x) && Number.isFinite(c.schematic.y) && !(c.schematic.x === 0 && c.schematic.y === 0 && c.schematic.group);
+  const positioned = comps.filter(isPositioned);
+  const auto = comps.filter((c) => !isPositioned(c));
 
   const placed: { sym: PlacedSymbol; terms: Terminal[]; full: Box }[] = [];
 

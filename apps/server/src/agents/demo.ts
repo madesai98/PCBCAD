@@ -192,7 +192,7 @@ async function buildDemoProduct(ctx: DemoContext) {
   });
 
   await ctx.step(
-    'Placing the main-board parts: USB-C receptacle, SS34 reverse-polarity Schottky, AMS1117-3.3 LDO with 10 µF caps, the ATmega328P (running from its internal 8 MHz oscillator at 3.3 V, so no crystal is needed), decoupling, reset pull-up, two status LEDs, I²C pull-ups, a JST-PH probe connector and a UART header.',
+    'Placing the main-board parts: USB-C receptacle, SS34 reverse-polarity Schottky, AMS1117-3.3 LDO with 10 µF caps, the ATmega328P (running from its internal 8 MHz oscillator at 3.3 V, so no crystal is needed), decoupling, reset pull-up, two status LEDs, I²C pull-ups, a side-entry JST-PH probe connector and a UART header.',
     () =>
       ctx.call('add_components', {
         boardId: 'Main',
@@ -215,7 +215,7 @@ async function buildDemoProduct(ctx: DemoContext) {
           { part: 'C17513', ref: 'R3', group: 'ui' },
           { part: 'C17673', ref: 'R4', group: 'i2c' },
           { part: 'C17673', ref: 'R5', group: 'i2c' },
-          { part: 'C131334', ref: 'J2', group: 'probe' },
+          { part: 'C265102', ref: 'J2', group: 'probe' },
           { part: 'C124378', ref: 'J3', group: 'debug' },
         ],
       }),
@@ -248,11 +248,11 @@ async function buildDemoProduct(ctx: DemoContext) {
     ctx.call('set_external_supply', { boardId: 'Main', ref: 'J1', supplies: [{ pin: 'VBUS', V: 5, Rint: 0.05, Imax: 3, name: 'USB-C charger' }] }),
   );
 
-  await ctx.step('Now the probe: a matching JST-PH connector, the BME280 in I²C mode (CSB high, SDO low → address 0x76) and its decoupling capacitor.', async () => {
+  await ctx.step('Now the probe: a matching side-entry JST-PH connector, the BME280 in I²C mode (CSB high, SDO low → address 0x76) and its decoupling capacitor.', async () => {
     await ctx.call('add_components', {
       boardId: 'Probe',
       components: [
-        { part: 'C131334', ref: 'J1' },
+        { part: 'C265102', ref: 'J1' },
         { part: 'C92489', ref: 'U1' },
         { part: 'C49678', ref: 'C1' },
       ],
@@ -268,9 +268,10 @@ async function buildDemoProduct(ctx: DemoContext) {
     });
   });
 
-  await ctx.step('Making the JST-PH headers functional connectors (mate with PHR-4 housings, 2 A per contact) and cabling the boards with real crimp parts: 2 × PHR-4 housings, 8 × SPH-002T-P0.5S terminals and 150 mm of AWG26.', async () => {
+  await ctx.step('The JST-PH headers came from the distributor with an inferred functional-connector spec (mates with PHR-4 housings, 2 A per contact, side entry). I refine the enclosure opening from the JST datasheet (PHR-4 housing 9.9 × 4.5 mm + clearance), then cable the boards with real crimp parts: 2 × PHR-4 housings, 8 × SPH-002T-P0.5S terminals and 150 mm of AWG26.', async () => {
+    await ctx.call('get_part', { partId: 'C265102' });
     await ctx.call('configure_connector', {
-      partId: 'C131334',
+      partId: 'C265102',
       family: 'JST-PH',
       gender: 'male',
       role: 'board',
@@ -281,40 +282,19 @@ async function buildDemoProduct(ctx: DemoContext) {
       currentRating: 2,
       voltageRating: 100,
       matingDirection: '+y',
-      opening: { width: 10.5, height: 6.5, zCenter: 3 },
-    });
-    await ctx.call('define_part', {
-      id: 'C111514',
-      mpn: 'PHR-4',
-      manufacturer: 'JST',
-      description: 'PH series 4-position crimp housing, 2.0 mm pitch',
-      category: 'connector',
-      package: 'P=2mm',
-      pins: [
-        { number: '1', name: '1' },
-        { number: '2', name: '2' },
-        { number: '3', name: '3' },
-        { number: '4', name: '4' },
-      ],
-      offers: [{ distributor: 'LCSC', sku: 'C111514', url: 'https://www.lcsc.com/product-detail/C111514.html' }],
-      connector: { family: 'JST-PH', gender: 'female', role: 'cable', positions: 4, pitch: 2, matesWith: ['JST-PH:male'], contactResistance: 0.02, currentRating: 2 },
-    });
-    await ctx.call('define_part', {
-      id: 'C111515',
-      mpn: 'SPH-002T-P0.5S',
-      manufacturer: 'JST',
-      description: 'PH crimp terminal, AWG 24–30',
-      category: 'connector',
-      package: 'crimp',
-      pins: [{ number: '1', name: '1' }],
-      offers: [{ distributor: 'LCSC', sku: 'C111515', url: 'https://www.lcsc.com/product-detail/C111515.html' }],
+      opening: { width: 10.6, height: 5.2, zCenter: 2.75 },
     });
     const r = await ctx.call('connect_boards', {
       name: 'Probe cable',
       kind: 'cable',
       a: { board: 'Main', ref: 'J2' },
       b: { board: 'Probe', ref: 'J1' },
-      mapping: 'straight',
+      mapping: [
+        { from: '1', to: '1', name: '3V3', color: 'red' },
+        { from: '2', to: '2', name: 'GND', color: 'black' },
+        { from: '3', to: '3', name: 'SDA', color: 'blue' },
+        { from: '4', to: '4', name: 'SCL', color: 'yellow' },
+      ],
       length: 150,
       awg: 26,
       cableParts: [
@@ -333,7 +313,7 @@ async function buildDemoProduct(ctx: DemoContext) {
   });
 
   await ctx.step('Laying out the boards: M3 mounting holes in the corners of the main board, USB-C on the left edge, probe connector on the right, UART header at the bottom; a ground pour on both layers, then autorouting.', async () => {
-    await ctx.call('add_mounting_holes', { boardId: 'Main', preset: 'corners', inset: 3.5, drill: 3.2 });
+    await ctx.call('add_mounting_holes', { boardId: 'Main', preset: 'corners', inset: 5, drill: 3.2 });
     await ctx.call('auto_place', { boardId: 'Main', edges: [{ ref: 'J1', edge: 'left' }, { ref: 'J2', edge: 'right' }, { ref: 'J3', edge: 'bottom' }] });
     await ctx.call('add_zone', { boardId: 'Main', net: 'GND', layer: 'bottom' });
     await ctx.call('add_zone', { boardId: 'Main', net: 'GND', layer: 'top', clearance: 0.3 });
@@ -342,6 +322,7 @@ async function buildDemoProduct(ctx: DemoContext) {
     await ctx.call('add_mounting_holes', { boardId: 'Probe', holes: [{ x: 3, y: 8 }], drill: 2.2 });
     await ctx.call('auto_place', { boardId: 'Probe', edges: [{ ref: 'J1', edge: 'left' }] });
     await ctx.call('add_zone', { boardId: 'Probe', net: 'GND', layer: 'bottom' });
+    await ctx.call('add_zone', { boardId: 'Probe', net: 'GND', layer: 'top', clearance: 0.25 });
     const r2 = await ctx.call('auto_route', { boardId: 'Probe', skipNets: ['GND'] });
     await ctx.say(firstLine(r2));
   });
@@ -373,7 +354,7 @@ async function buildDemoProduct(ctx: DemoContext) {
       materialId: 'pc-abs',
       process: 'injection-molding',
       wall: 2,
-      clearance: 1,
+      clearance: 0.6,
       insert: 'heat-set',
       ventFaces: ['top', 'bottom'],
       color: '#e8e6e1',
@@ -390,7 +371,8 @@ async function buildDemoProduct(ctx: DemoContext) {
     if (!encl.baseId) return;
     const t = 1.5;
     const len = 16;
-    const yc = encl.d / 2 + 0.2 + t - len / 2; // flange inner face 0.2 mm behind the enclosure's back face
+    const r = t; // inside bend radius (≥ 1 t for 5052-H32)
+    const yc = encl.d / 2 + 0.3 + r + t - len / 2; // bend clear of the enclosure's bottom edge
     const z0 = -(t + 0.2);
     await ctx.call('create_sheet_metal_part', {
       name: 'Wall bracket',
@@ -399,15 +381,16 @@ async function buildDemoProduct(ctx: DemoContext) {
       base: { width: 40, length: len },
       flanges: [{ edge: '+y', length: Math.round(encl.h + 5), angle: 90, holes: [{ x: -12, y: Math.round(encl.h * 0.7), diameter: 4.5 }, { x: 12, y: Math.round(encl.h * 0.7), diameter: 4.5 }] }],
       holes: [
-        { x: -10, y: -2, diameter: 3.4 },
-        { x: 10, y: -2, diameter: 3.4 },
+        { x: -10, y: -3.5, diameter: 3.4 },
+        { x: 10, y: -3.5, diameter: 3.4 },
       ],
+      bendRadius: r,
       finish: 'anodized-black',
       position: [0, yc, z0],
     });
-    const yb = yc - 2;
+    const yb = yc - 3.5;
     for (const x of [-10, 10])
-      await ctx.call('add_shell_feature', { partId: encl.baseId, type: 'boss', params: { x, y: yb, outerDiameter: 8, holeDiameter: 4, height: 5, kind: 'insert', throughFloor: true, gussets: 2, fastenerPartId: 'fastener:insert-m3x4-od4.6' } });
+      await ctx.call('add_shell_feature', { partId: encl.baseId, type: 'boss', params: { x, y: yb, outerDiameter: 10, holeDiameter: 4, height: 5, kind: 'insert', throughFloor: true, gussets: 2, fastenerPartId: 'fastener:insert-m3x4-od4.6' } });
     await ctx.call('add_fastener', { part: 'fastener:insert-m3x4-od4.6', position: [-10, yb, 7], positions: [[10, yb, 7]], direction: [0, 0, -1], note: 'Bracket inserts' });
     await ctx.call('add_fastener', { part: 'fastener:iso7380-m3x8', position: [-10, yb, z0], positions: [[10, yb, z0]], direction: [0, 0, 1], note: 'Bracket to enclosure' });
   });

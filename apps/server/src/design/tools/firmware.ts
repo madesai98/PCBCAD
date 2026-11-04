@@ -251,8 +251,9 @@ export const firmwareTools: ToolDef[] = [
         const b = requireBoard(ctx.session.project, a.assign.boardId);
         const c = requireComponent(b, a.assign.ref);
         ctx.session.mutate(ctx, 'configure_mcu', () => {
-          c.mcu = { ...c.mcu, firmwareId: fw.id };
-          return `Assigned ${fw.name} to ${c.ref}`;
+          // the emulated clock must match the F_CPU the image was compiled for
+          c.mcu = { ...c.mcu, firmwareId: fw.id, clockHz: a.fCpu ?? 16000000 };
+          return `Assigned ${fw.name} to ${c.ref} (${((a.fCpu ?? 16000000) / 1e6).toFixed(0)} MHz)`;
         });
       }
       return `Built ${fw.name} [${fw.id}] (${fw.size} bytes hex).${size ? `\n${size}` : ''}${a.assign ? `\nAssigned to ${a.assign.ref}.` : ''}`;

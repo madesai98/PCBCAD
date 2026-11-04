@@ -47,6 +47,12 @@ export interface StructuralSetup {
    */
   bodyAcceleration?: Vec3;
   /**
+   * Advanced: per-voxel body-force acceleration (m/s², grid frame) replacing `bodyAcceleration`, e.g. the
+   * rigid-body acceleration field of an impact (translation + rotation). Called once per solid voxel with
+   * the voxel centre (mm) and its linear index.
+   */
+  bodyAccelerationField?: (x: number, y: number, z: number, voxel: number) => Vec3;
+  /**
    * Where voxel stresses are sampled: 'surface' (default) = max of the centroid value and the values at
    * the centres of the voxel's exposed / material-interface faces (captures the bending surface stress of
    * thin walls); 'centroid' = centroid only (smoother, but under-reads the surface stress of a 2-voxel
@@ -111,11 +117,16 @@ export interface DropExtraMass {
   support?: Region;
 }
 
-export interface DropSetup extends Omit<StructuralSetup, 'loads' | 'bodyAcceleration' | 'fixtures'> {
+export interface DropSetup extends Omit<StructuralSetup, 'loads' | 'bodyAcceleration' | 'bodyAccelerationField' | 'fixtures'> {
   /** Drop height (m). */
   heightM: number;
   orientation: DropOrientation;
   /** Floor type (default 'concrete'). */
   floor?: DropFloor;
   extraMasses?: DropExtraMass[];
+  /**
+   * Correct the equivalent-static load of each region with the half-sine shock-response spectrum at its
+   * local natural frequency (default true). false = classic equivalent-static (dynamic factor 1).
+   */
+  dynamicCorrection?: boolean;
 }

@@ -251,3 +251,74 @@ describe('solveAirflow — performance', () => {
     expect(r.streamlines.length).toBeGreaterThan(10);
   });
 });
+
+describe('solveAirflow — @pcbcad/mech domain conventions', () => {
+  it("an 'ambient' padding layer reproduces walls-on-the-boundary (externalH on the outer surfaces)", () => {
+    const n = 20;
+    const block = (i: number, j: number, k: number) => i >= 8 && i < 12 && j >= 8 && j < 12 && k >= 3 && k < 5;
+    const boxCell = (i: number, j: number, k: number) => (i === 0 || j === 0 || k === 0 || i === n - 1 || j === n - 1 || k === n - 1 ? 1 : block(i, j, k) ? 2 : 0);
+    const plain = makeGrid(n, n, n, 5, boxCell);
+    const rPlain = solveAirflow({ grid: plain, materials: MATS, heatSources: [{ cells: cellsWhere(plain, block), power: 1 }], openings: [], ambient: 25 });
+    // same box with one cell of outside air on every side, marked as the ambient opening (mech convention)
+    const m = n + 2;
+    const inBox = (i: number, j: number, k: number) => i >= 1 && j >= 1 && k >= 1 && i <= n && j <= n && k <= n;
+    const padded = makeGrid(m, m, m, 5, (i, j, k) => (inBox(i, j, k) ? boxCell(i - 1, j - 1, k - 1) : 0));
+    const rPad = solveAirflow({
+      grid: padded,
+      materials: MATS,
+      heatSources: [{ cells: cellsWhere(padded, (i, j, k) => inBox(i, j, k) && block(i - 1, j - 1, k - 1)), power: 1 }],
+      openings: [{ name: 'ambient', kind: 'ambient', cells: cellsWhere(padded, (i, j, k) => !inBox(i, j, k)) }],
+      ambient: 25,
+    });
+    expect(rPad.converged).toBe(true);
+    expect(Math.abs(rPad.components[0].temperature - rPlain.components[0].temperature)).toBeLessThan(0.02 * (rPlain.components[0].temperature - 25));
+    expect(rPad.heatBalance.walls).toBeGreaterThan(0.95); // leaves through externalH, not by grid conduction
+    expect(Math.abs(rPad.heatBalance.walls + rPad.heatBalance.vents - 1)).toBeLessThan(1e-6);
+  });
+
+  it('vent porosity adds a Borda–Carnot loss that throttles a chimney', () => {
+    const open = solveAirflow(chimney(1));
+    const s = chimney(1);
+    const throttled = solveAirflow({ ...s, openings: s.openings.map((o) => ({ ...o, kind: 'vent', porosity: 0.1 })) });
+    const qOpen = open.vents.find((v) => v.name === 'top')!.flowM3s;
+    const qThrottled = throttled.vents.find((v) => v.name === 'top')!.flowM3s;
+    expect(throttled.converged).toBe(true);
+    expect(qThrottled).toBeLessThan(0.9 * qOpen);
+    expect(throttled.components[0].temperature).toBeGreaterThan(open.components[0].temperature);
+    const t = throttled.vents;
+    expect(Math.abs(t[0].flowM3s - t[1].flowM3s) / t[1].flowM3s).toBeLessThan(0.05);
+  });
+
+  it('a fan with maxPressurePa runs on its linear fan curve', () => {
+    const nx = 40;
+    const ny = 8;
+    const nz = 8;
+    const wall = (j: number, k: number) => j === 0 || k === 0 || j === ny - 1 || k === nz - 1;
+    const grid = makeGrid(nx, ny, nz, 5, (_i, j, k) => (wall(j, k) ? 1 : 0));
+    const base = {
+      grid,
+      materials: MATS,
+      heatSources: [],
+      fans: [{ name: 'F1', cells: cellsWhere(grid, (i, j, k) => i === 10 && !wall(j, k)), direction: [1, 0, 0] as [number, number, number], flowM3s: 2e-4, maxPressurePa: 2 }],
+      ambient: 25,
+    };
+    const freeOpenings = [
+      { name: 'inlet', cells: cellsWhere(grid, (i, j, k) => i === 0 && !wall(j, k)) },
+      { name: 'outlet', cells: cellsWhere(grid, (i, j, k) => i === nx - 1 && !wall(j, k)) },
+    ];
+    const free = solveAirflow({ ...base, openings: freeOpenings });
+    const restricted = solveAirflow({ ...base, openings: freeOpenings.map((o) => ({ ...o, porosity: 0.15 })) });
+    for (const r of [free, restricted]) {
+      expect(r.mode).toBe('forced');
+      expect(r.converged).toBe(true);
+      const fan = r.fans[0];
+      const out = r.vents.find((v) => v.name === 'outlet')!;
+      expect(Math.abs(out.flowM3s - fan.flowM3s) / fan.flowM3s).toBeLessThan(0.05);
+      expect(fan.flowM3s).toBeLessThan(2e-4);
+      // operating point on the curve Δp = pmax (1 − Q/Qmax), measured as the static rise across the fan
+      expect(Math.abs(fan.pressureRisePa - 2 * (1 - fan.flowM3s / 2e-4))).toBeLessThan(0.25);
+    }
+    expect(free.fans[0].flowM3s).toBeGreaterThan(0.7 * 2e-4);
+    expect(restricted.fans[0].flowM3s).toBeLessThan(0.8 * free.fans[0].flowM3s);
+  });
+});

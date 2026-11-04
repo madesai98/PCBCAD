@@ -18,6 +18,7 @@ import {
 } from '@pcbcad/core';
 import { requireBoard, requireMech } from '../helpers';
 import { S, ToolError, type ToolContext, type ToolDef } from '../registry';
+import { FASTENERS } from '@pcbcad/parts';
 import { ensurePart } from './parts';
 import { formatIssues, setIssues } from './project';
 
@@ -89,7 +90,8 @@ export const mechTools: ToolDef[] = [
         cornerRadius: S.num(),
         ventFaces: S.arr(S.enum(['top', 'bottom', '+x', '-x', '+y', '-y']), 'Vent slot faces. top/bottom (cover/base floors) mold without slides and form a natural-convection chimney; side faces need side actions.'),
         insert: S.enum(['heat-set', 'self-tapping']),
-        screwPart: S.str('Fastener part id for PCB/case screws'),
+        screwPart: S.str('Fastener part id for PCB screws (e.g. fastener:iso7380-m3x8)'),
+        caseScrewPart: S.str('Fastener part id for the cover-to-base screws (default: catalog screw of the computed length)'),
         insertPart: S.str('Heat-set insert part id'),
         color: S.str('#rrggbb'),
       },
@@ -104,6 +106,7 @@ export const mechTools: ToolDef[] = [
       checkMaterialProcess(materialId, process);
       const screw = a.screwPart ? await ensurePart(ctx, a.screwPart) : undefined;
       const insert = a.insertPart ? await ensurePart(ctx, a.insertPart) : undefined;
+      const caseScrew = a.caseScrewPart ? await ensurePart(ctx, a.caseScrewPart) : undefined;
       const r = await ctx.services.tasks.run<{ base: EnclosureShell; cover: EnclosureShell; instances: AssemblyInstance[]; fasteners: FastenerInstance[]; notes: string[] }>(
         'mech.enclosure',
         {
@@ -119,7 +122,7 @@ export const mechTools: ToolDef[] = [
             cornerRadius: a.cornerRadius,
             ventFaces: a.ventFaces,
             insert: a.insert,
-            fastenerPartIds: { screw: screw?.id, insert: insert?.id },
+            fastenerPartIds: { screw: screw?.id, caseScrew: caseScrew?.id, insert: insert?.id },
           },
         },
         { signal: ctx.signal },
@@ -128,8 +131,17 @@ export const mechTools: ToolDef[] = [
         r.base.color = a.color;
         r.cover.color = a.color;
       }
-      // fasteners without a part id: try the catalog defaults
-      for (const f of r.fasteners) if (!f.partId && screw) f.partId = screw.id;
+      // Fasteners the generator could not assign (e.g. case screws, whose length depends on the
+      // stack height it computed): pick the matching catalog part from the note it left.
+      const picked = new Set<string>();
+      for (const f of r.fasteners) {
+        if (f.partId) continue;
+        const id = pickCatalogFastener(f.note ?? '', screw?.fastener?.head);
+        if (!id) continue;
+        f.partId = id;
+        picked.add(id);
+      }
+      for (const id of picked) await ensurePart(ctx, id);
       const fasteners = r.fasteners.filter((f) => f.partId);
       ctx.session.mutate(ctx, 'create_enclosure', (pr) => {
         pr.mechanical = pr.mechanical.filter((m) => m.id !== r.base.id && m.id !== r.cover.id);
@@ -489,5 +501,39 @@ export const mechTools: ToolDef[] = [
     },
   },
 ];
+
+
+/**
+ * Choose a catalog fastener for an auto-enclosure note such as "M3 × 12 pan-head case screw",
+ * "M3 heat-set insert Ø4.6 × 5.7 in boss pcb1" or "M3 hex standoff, male-female, 8 mm".
+ */
+function pickCatalogFastener(note: string, preferHead?: string): string | undefined {
+  const thread = /\bM(\d+(?:\.\d+)?)\b/.exec(note)?.[1];
+  if (!thread) return undefined;
+  const M = `M${thread}`;
+  const pool = FASTENERS.filter((f) => f.fastener?.thread === M);
+  if (/insert/i.test(note)) {
+    const len = Number(/×\s*([\d.]+)/.exec(note)?.[1] ?? NaN);
+    const inserts = pool.filter((f) => f.fastener!.type === 'heat-set-insert');
+    return closest(inserts, Number.isFinite(len) ? len : 5)?.id;
+  }
+  if (/standoff/i.test(note)) {
+    const len = Number(/([\d.]+)\s*mm/.exec(note)?.[1] ?? NaN);
+    const mf = /male-female/i.test(note);
+    const st = pool.filter((f) => f.fastener!.type === 'standoff' && (!mf || f.fastener!.ends === 'male-female'));
+    return closest(st, Number.isFinite(len) ? len : 8)?.id;
+  }
+  const len = Number(/×\s*([\d.]+)/.exec(note)?.[1] ?? NaN);
+  const head = /pan/i.test(note) ? 'pan' : preferHead;
+  const screws = pool.filter((f) => f.fastener!.type === 'screw' && f.id.startsWith('fastener:'));
+  const sameHead = screws.filter((f) => !head || f.fastener!.head === head || f.fastener!.head === preferHead);
+  return closest(sameHead.length ? sameHead : screws, Number.isFinite(len) ? len : 8, true)?.id;
+}
+
+function closest<T extends { fastener?: { length?: number } }>(list: T[], target: number, atLeast = false): T | undefined {
+  const ok = atLeast ? list.filter((f) => (f.fastener?.length ?? 0) >= target - 1e-6) : list;
+  const pool = ok.length ? ok : list;
+  return [...pool].sort((a, b) => Math.abs((a.fastener?.length ?? 0) - target) - Math.abs((b.fastener?.length ?? 0) - target))[0];
+}
 
 export { runMechChecks };

@@ -454,6 +454,28 @@ async function airflow(p: { project: Project; ambient?: number; resolution?: num
   await mech.initGeometry();
   progress(0.02, 'Voxelising enclosure, boards and components');
   const domain = await mech.voxelizeAssemblyForAirflow(p.project, { h: p.resolution });
+  // The voxel model has no copper: boards are plain dielectric slabs and IC bodies plain epoxy,
+  // which hugely under-predicts heat spreading. Use effective conductivities instead: board =
+  // in-plane FR-4 + copper layers at ~50 % coverage; package = epoxy with lead frame (~3 W/mK).
+  const modelNotes: string[] = [];
+  const kBoard = Math.max(
+    1,
+    ...p.project.boards.map((b) => {
+      const t = b.stackup.thickness;
+      const outer = 2 * b.stackup.copperOz.outer * 0.0347;
+      const inner = Math.max(0, b.stackup.layers - 2) * b.stackup.copperOz.inner * 0.0347;
+      return (0.8 * Math.max(0.2, t - outer - inner) + 385 * 0.5 * (outer + inner)) / t;
+    }),
+  );
+  domain.materials.forEach((m, i) => {
+    if (m.materialId === 'fr4' || /fr-?4/i.test(m.name)) {
+      domain.materials[i] = { ...m, thermalConductivity: kBoard };
+      modelNotes.push(`PCB modelled with effective k ${kBoard.toFixed(1)} W/mK (copper layers)`);
+    } else if (m.materialId === 'epoxy-mold') {
+      domain.materials[i] = { ...m, thermalConductivity: 3 };
+      modelNotes.push('IC bodies modelled with effective k 3 W/mK (lead frame)');
+    }
+  });
   let power = p.power;
   if (!power) {
     progress(0.08, 'Solving circuits for power dissipation');
@@ -491,6 +513,7 @@ async function airflow(p: { project: Project; ambient?: number; resolution?: num
   };
   const text = [
     summary.headline,
+    ...modelNotes,
     `Heat: input ${result.heatBalance.input.toFixed(2)} W, vents ${result.heatBalance.vents.toFixed(2)} W, walls ${result.heatBalance.walls.toFixed(2)} W.`,
     'Vents: ' + result.vents.map((v) => `${v.name} ${v.direction} ${(v.flowM3s * 60000).toFixed(2)} L/min`).join(', '),
     'Components: ' + result.components.map((c) => `${c.ref} ${c.temperature.toFixed(1)}°C (${formatValue(c.power, 'W')})`).join(', '),

@@ -89,7 +89,7 @@ export function autoPlace(board: Board, parts: Record<string, PartDef>, opts: Au
  * body overhangs the edge by `overhang` (shell/housing only — pads keep rules.edgeClearance), as
  * long as its courtyard does not run into another component. Mutates `board`.
  */
-export function flushEdgeConnectors(board: Board, parts: Record<string, PartDef>, report: string[] = [], overhang = 0.5): void {
+export function flushEdgeConnectors(board: Board, parts: Record<string, PartDef>, report: string[] = [], overhang = 1.0): void {
   if (!board.outline?.length) return;
   const bb = polygonBBox(board.outline);
   const ec = Math.max(0, board.rules.edgeClearance);

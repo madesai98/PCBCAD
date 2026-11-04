@@ -79,6 +79,7 @@ interface Actions {
 }
 
 let toastId = 1;
+let initialised = false;
 
 function loadPref<T>(k: string, d: T): T {
   try {
@@ -116,7 +117,9 @@ export const useApp = create<State & Actions>((set, get) => ({
 
   init() {
     document.documentElement.classList.toggle('dark', get().theme === 'dark');
-    rpc.onStatus((s) => {
+    if (initialised) return; // StrictMode runs effects twice
+    initialised = true;
+    const onStatus = (s: 'connecting' | 'open' | 'closed') => {
       set({ conn: s });
       if (s === 'open') {
         void rpc.call<ProjectSummary[]>('projects.list').then((projects) => set({ projects, projectsLoaded: true }));
@@ -124,8 +127,11 @@ export const useApp = create<State & Actions>((set, get) => ({
         const pid = get().projectId ?? loadPref<string | undefined>('project', undefined);
         if (pid) void get().openProject(pid).catch(() => set({ projectId: undefined, project: undefined }));
       }
-    });
+    };
+    rpc.onStatus(onStatus);
     rpc.on((e) => handleEvent(e, set, get));
+    // the socket may already be open by the time React mounts
+    onStatus(rpc.status);
   },
 
   async refreshProviders(refresh = false) {

@@ -240,7 +240,9 @@ export const schematicTools: ToolDef[] = [
           side: spec.side ?? 'top',
           placed,
           pinNets: {},
-          schematic: spec.group ? { x: 0, y: 0, group: spec.group } : undefined,
+          // the functional group is a layout hint, not a schematic position (explicit positions
+          // pin the symbol; leaving them unset lets the schematic auto-layout place it)
+          fields: spec.group ? { group: spec.group } : undefined,
         };
         ctx.session.mutate(ctx, 'add_component', () => {
           b.components.push(comp);
@@ -298,7 +300,11 @@ export const schematicTools: ToolDef[] = [
         if (a.dnp != null) c.dnp = a.dnp;
         if (a.fields) c.fields = { ...c.fields, ...a.fields };
         if (a.simOverrides) c.simOverrides = { ...c.simOverrides, ...a.simOverrides };
-        if (a.schematic) c.schematic = { ...(c.schematic ?? { x: 0, y: 0 }), ...a.schematic };
+        if (a.schematic) {
+          const { group, ...pos } = a.schematic as { x?: number; y?: number; rotation?: number; group?: string };
+          if (group) c.fields = { ...c.fields, group };
+          if (pos.x != null && pos.y != null) c.schematic = { ...c.schematic, x: pos.x, y: pos.y, ...(pos.rotation != null ? { rotation: pos.rotation } : {}) };
+        }
         return `Updated ${c.ref} on ${b.name}`;
       });
       return `Updated ${c.ref}: ${c.value ?? ''} at (${c.x.toFixed(2)}, ${c.y.toFixed(2)}) rot ${c.rotation}° ${c.side}${c.dnp ? ' DNP' : ''}${c.locked ? ' locked' : ''}.`;

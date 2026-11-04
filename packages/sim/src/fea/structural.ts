@@ -385,7 +385,8 @@ export function analyzeStructure(setup: StructuralSetup): StructuralAnalysis {
   });
   const acc = setup.bodyAcceleration;
   if (acc && !acc.every((c) => Number.isFinite(c))) throw new Error('structural: bodyAcceleration must be finite');
-  const hasAcc = !!acc && acc.some((c) => c !== 0);
+  const accField = setup.bodyAccelerationField;
+  const hasAcc = !!accField || (!!acc && acc.some((c) => c !== 0));
 
   // ---- per-voxel bookkeeping
   const solidIdx = new Uint32Array(nSolid);
@@ -518,9 +519,12 @@ export function analyzeStructure(setup: StructuralSetup): StructuralAnalysis {
       for (let e = 0; e < nE; e++) {
         const v = body.voxels[e];
         const mKg = mats[solid[v] - 1].density * vol * 1e-9;
-        const fx = (mKg * acc![0]) / 8;
-        const fy = (mKg * acc![1]) / 8;
-        const fz = (mKg * acc![2]) / 8;
+        const av = accField
+          ? accField(origin[0] + ((v % nx) + 0.5) * h, origin[1] + ((((v / nx) | 0) % ny) + 0.5) * h, origin[2] + (((v / (nx * ny)) | 0) + 0.5) * h, v)
+          : acc!;
+        const fx = (mKg * av[0]) / 8;
+        const fy = (mKg * av[1]) / 8;
+        const fz = (mKg * av[2]) / 8;
         for (let a = 0; a < 8; a++) {
           const n = conn[e * 8 + a];
           f[3 * n] += fx;
@@ -804,8 +808,8 @@ export function buildStructuralResult(
   if (size > 0 && maxDisp > 0.02 * size)
     warnings.push(
       `Large deflection: ${maxDisp.toFixed(2)} mm is ${((100 * maxDisp) / size).toFixed(1)} % of the part size (${size.toFixed(1)} mm); ` +
-        'the linear small-deflection result is not reliable there. Check for parts joined only by a few voxels, ' +
-        'loads applied to unsupported thin walls, or missing fixtures.',
+        'linear small-deflection theory is only approximate at this level. If unexpected, check for parts joined only ' +
+        'by a few voxels, loads on unsupported thin walls, or missing fixtures.',
     );
   return {
     kind: 'structural',

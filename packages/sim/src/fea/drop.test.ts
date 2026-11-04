@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { toFloat32, toUint32 } from '@pcbcad/core';
-import { FLOOR_STIFFNESS, solveDrop } from './drop';
+import { FLOOR_STIFFNESS, halfSineShockFactor, solveDrop } from './drop';
 import { makeGrid, testMaterial } from './testkit';
 import type { DropSetup } from './types';
 
@@ -35,10 +35,13 @@ describe('solveDrop', () => {
     for (const r of [r1, r2]) {
       const m = r.massGrams / 1000;
       const k = r.stiffness.effective;
+      const mEff = r.effectiveMassGrams / 1000;
+      expect(mEff).toBeLessThanOrEqual(m * (1 + 1e-9));
+      expect(mEff / m).toBeGreaterThan(0.95); // centred face drop: (almost) no rotation
       expect(k).toBeCloseTo(1 / (1 / r.stiffness.structural + 1 / FLOOR_STIFFNESS.concrete), 3);
-      expect(r.peakForceN).toBeCloseTo(r.impactVelocity * Math.sqrt(k * m), 6);
+      expect(r.peakForceN).toBeCloseTo(r.impactVelocity * Math.sqrt(k * mEff), 6);
       expect(r.peakG).toBeCloseTo(r.peakForceN / m / 9.81, 6);
-      expect(r.contactDurationMs).toBeCloseTo(Math.PI * Math.sqrt(m / k) * 1000, 6);
+      expect(r.contactDurationMs).toBeCloseTo(Math.PI * Math.sqrt(mEff / k) * 1000, 6);
       expect(r.stopDistanceMm).toBeCloseTo((r.peakForceN / k) * 1000, 6);
       expect(r.kind).toBe('drop');
       expect(r.structural.kind).toBe('structural');
@@ -91,10 +94,12 @@ describe('solveDrop', () => {
     );
     expect(r.componentRisks.map((c) => c.ref)).toEqual(['R1', 'BT1']);
     for (const c of r.componentRisks) {
-      const expected =
-        c.inertialForceN > 40 || (c.massGrams > 2 && r.peakG > 1500) ? 'high' : c.inertialForceN > 10 || r.peakG > 500 ? 'medium' : 'low';
+      // local rigid-body acceleration at the component (translation + rotation about the centre of mass)
+      const gLocal = c.inertialForceN / (c.massGrams / 1000) / 9.81;
+      const expected = c.inertialForceN > 40 || (c.massGrams > 2 && gLocal > 1500) ? 'high' : c.inertialForceN > 10 || gLocal > 500 ? 'medium' : 'low';
       expect(c.risk).toBe(expected);
-      expect(c.inertialForceN).toBeCloseTo((c.massGrams / 1000) * r.peakG * 9.81, 6);
+      expect(gLocal / r.peakG).toBeGreaterThan(0.7);
+      expect(gLocal / r.peakG).toBeLessThan(1.3);
       expect(c.note.length).toBeGreaterThan(10);
     }
     expect(r.componentRisks[1].risk).toBe('high');
@@ -120,5 +125,90 @@ describe('solveDrop', () => {
     const r = solveDrop(base({ heightM: 0 }));
     expect(r.peakForceN).toBe(0);
     expect(r.structural.maxVonMises).toBe(0);
+  });
+});
+
+describe('solveDrop — load paths, rigid-body loading and shock response', () => {
+  const pcabs = testMaterial({ materialId: 'pc-abs', name: 'PC/ABS', E: 2300, nu: 0.36, density: 1140, yieldStrength: 53 });
+  /** Closed 56 × 64 × 24 mm PC/ABS shell (2 mm walls, h = 2 mm) with four Ø6 mm bosses up to z = 8 mm. */
+  function shell() {
+    const nx = 28;
+    const ny = 32;
+    const nz = 12;
+    const bosses: [number, number][] = [[8, 8], [48, 8], [8, 56], [48, 56]];
+    const grid = makeGrid(nx, ny, nz, 2, (i, j, k) => {
+      const x = 2 * i + 1;
+      const y = 2 * j + 1;
+      const z = 2 * k + 1;
+      if (i === 0 || j === 0 || k === 0 || i === nx - 1 || j === ny - 1 || k === nz - 1) return 1;
+      return z < 8 && bosses.some(([bx, by]) => Math.hypot(x - bx, y - by) < 3.2) ? 1 : 0;
+    });
+    const bossCells: number[] = [];
+    for (let v = 0; v < grid.cells.length; v++) {
+      const k = Math.floor(v / (nx * ny));
+      if (grid.cells[v] && k >= 1 && k <= 3 && bosses.some(([bx, by]) => Math.hypot(2 * (v % nx) + 1 - bx, 2 * (Math.floor(v / nx) % ny) + 1 - by) < 3.2)) bossCells.push(v);
+    }
+    // a PCB at z ≈ 9 mm with components floating in the cavity (the board itself is not voxelised)
+    const masses = [
+      { position: [28, 32, 9] as [number, number, number], massGrams: 5.2, ref: 'PCB' },
+      { position: [20, 25, 11] as [number, number, number], massGrams: 8, componentId: 'bt1', ref: 'BT1' },
+      { position: [36, 40, 10.5] as [number, number, number], massGrams: 2, componentId: 'u1', ref: 'U1' },
+      { position: [15, 45, 10.5] as [number, number, number], massGrams: 1.2, componentId: 'j1', ref: 'J1' },
+      { position: [40, 20, 10] as [number, number, number], massGrams: 0.3, componentId: 'c1', ref: 'C1' },
+    ];
+    return { grid, masses, bossCells };
+  }
+
+  it('masses floating in a cavity load the structure where they press, without point-load artefacts', () => {
+    const { grid, masses } = shell();
+    const r = solveDrop({ grid, materials: [pcabs], heightM: 1, orientation: 'bottom', extraMasses: masses });
+    console.log(
+      `shell drop 1 m bottom: m=${r.massGrams.toFixed(1)} g, ${r.peakG.toFixed(0)} g, σmax=${r.structural.maxVonMises.toFixed(1)} MPa ` +
+        `(raw ${r.structural.raw.maxVonMises.toFixed(1)}, p99 ${r.structural.vonMisesP99.toFixed(1)}), SF ${r.structural.minSafetyFactor.toFixed(2)}, ` +
+        `δmax=${r.structural.maxDisplacement.toFixed(2)} mm, dyn ${r.dynamics.factorMin.toFixed(2)}–${r.dynamics.factorMax.toFixed(2)}`,
+    );
+    expect(r.massAttachments.every((a) => a.method === 'drop-path' && a.voxels >= 9)).toBe(true);
+    expect(r.massGrams).toBeGreaterThan(40);
+    expect(r.massGrams).toBeLessThan(70);
+    expect(r.structural.maxVonMises).toBeLessThan(53); // a 1 m flat drop of a ~55 g plastic box is survivable
+    expect(r.structural.minSafetyFactor).toBeGreaterThan(1);
+    expect(r.structural.raw.maxVonMises).toBeLessThan(2 * r.structural.vonMisesP99 + 1e-9);
+    expect(r.structural.maxDisplacement).toBeLessThan(3);
+    expect(r.dynamics.applied).toBe(true);
+  });
+
+  it('support regions carry the board and component inertia through the bosses', () => {
+    const { grid, masses, bossCells } = shell();
+    const support = { kind: 'cells' as const, indices: bossCells };
+    const r = solveDrop({ grid, materials: [pcabs], heightM: 1, orientation: 'side-x', extraMasses: masses.map((m) => ({ ...m, support })) });
+    expect(r.massAttachments.every((a) => a.method === 'support' && a.voxels === bossCells.length)).toBe(true);
+    // the highest stress sits in or at the root of a boss (z < 10 mm, within 6 mm of a boss axis)
+    const [x, y, z] = r.structural.maxStressAt;
+    const nearBoss = [[8, 8], [48, 8], [8, 56], [48, 56]].some(([bx, by]) => Math.hypot(x - bx, y - by) < 6);
+    expect(nearBoss && z < 10).toBe(true);
+    expect(Number.isFinite(r.structural.maxVonMises)).toBe(true);
+  });
+
+  it('uses rigid-body (inertia-relief) loading: no rotation for a centred face drop, reduced effective mass at a corner', () => {
+    const { grid } = shell();
+    const flat = solveDrop({ grid, materials: [pcabs], heightM: 1, orientation: 'bottom' });
+    expect(Math.hypot(...flat.angularAcceleration)).toBeLessThan(1e-6 * flat.peakG * 9.81 * 1000);
+    expect(flat.effectiveMassGrams / flat.massGrams).toBeGreaterThan(0.999);
+    const corner = solveDrop({ grid, materials: [pcabs], heightM: 1, orientation: 'corner' });
+    expect(corner.effectiveMassGrams).toBeLessThan(0.9 * corner.massGrams);
+    expect(Math.hypot(...corner.angularAcceleration)).toBeGreaterThan(1e3);
+    expect(corner.structural.maxDisplacement).toBeLessThan(5);
+  });
+
+  it('half-sine shock-response factor has the textbook shape', () => {
+    expect(halfSineShockFactor(0.1)).toBeCloseTo(0.396, 2);
+    expect(halfSineShockFactor(0.01)).toBeCloseTo(0.04, 3);
+    let peak = 0;
+    for (let r = 0.3; r < 2; r += 0.01) peak = Math.max(peak, halfSineShockFactor(r));
+    expect(peak).toBeCloseTo(1.77, 1);
+    expect(halfSineShockFactor(50)).toBeCloseTo(1, 1);
+    const { grid } = shell();
+    const off = solveDrop({ grid, materials: [pcabs], heightM: 1, orientation: 'bottom', dynamicCorrection: false });
+    expect(off.dynamics).toMatchObject({ applied: false, factorMin: 1, factorMax: 1 });
   });
 });

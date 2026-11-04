@@ -763,7 +763,12 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
         }
       }
       const K = lossK[q];
-      if (K > 0) apSum += 0.5 * rho * K * Math.abs(uP) * A; // vent loss ½ρK|u|u·A (Picard-linearised)
+      if (K > 0) {
+        // vent loss ½ρK|u|u·A, Newton-linearised about the current u (exact at convergence, well damped)
+        const c = rho * K * Math.abs(uP) * A;
+        apSum += c;
+        bSum += 0.5 * c * uP;
+      }
       if (fanB) {
         apSum += fanAP![q];
         bSum += fanB[q];

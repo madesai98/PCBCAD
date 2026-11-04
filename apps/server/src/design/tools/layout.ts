@@ -165,6 +165,25 @@ export const layoutTools: ToolDef[] = [
         b.vias = r.board.vias;
         return `Routed ${r.routed.length} nets on ${b.name} (${r.stats.vias} vias, ${r.stats.lengthMm.toFixed(0)} mm)${r.failed.length ? `, ${r.failed.length} failed` : ''}`;
       });
+      // fine-pitch parts (LGA/QFN) often need a finer grid to escape: retry failures at half grid
+      const grid0 = a.grid ?? b.rules.routingGrid;
+      if (r.failed.length && grid0 > 0.12) {
+        const fine = Math.max(0.1, grid0 / 2);
+        const r2 = await ctx.services.tasks.run<typeof r>(
+          'pcb.route',
+          { board: b, parts: partsFor(p, b), opts: { nets: r.failed.map((f) => f.netId), grid: fine, maxTimeMs: a.maxTimeMs ?? 60_000, layers: copperLayers(b.stackup) } },
+          { signal: ctx.signal, timeoutMs: 5 * 60_000 },
+        );
+        if (r2.routed.length) {
+          ctx.session.mutate(ctx, 'auto_route', () => {
+            b.traces = r2.board.traces;
+            b.vias = r2.board.vias;
+            return `Routed ${r2.routed.length} remaining net(s) on a ${fine} mm grid`;
+          });
+          r.routed.push(...r2.routed);
+          r.failed = r2.failed;
+        }
+      }
       await refillZones(ctx, b);
       // Nets skipped because a pour should join them: if the pour leaves islands (pads cut off by
       // other copper, or top/bottom pours not stitched), route those nets too.
@@ -173,11 +192,19 @@ export const layoutTools: ToolDef[] = [
         const conn = connectivity(b, partsFor(p, b));
         const broken = skip.filter((id) => (conn.get(id)?.length ?? 1) > 1);
         if (broken.length) {
-          const r2 = await ctx.services.tasks.run<{ board: Board; routed: string[]; failed: { netId: string; name: string; reason: string }[]; stats: { segments: number; vias: number; lengthMm: number; timeMs: number } }>(
+          let r2 = await ctx.services.tasks.run<{ board: Board; routed: string[]; failed: { netId: string; name: string; reason: string }[]; stats: { segments: number; vias: number; lengthMm: number; timeMs: number } }>(
             'pcb.route',
             { board: b, parts: partsFor(p, b), opts: { nets: broken, grid: a.grid, maxTimeMs: a.maxTimeMs ?? 60_000, layers: copperLayers(b.stackup) } },
             { signal: ctx.signal, timeoutMs: 5 * 60_000 },
           );
+          if (r2.failed.length && grid0 > 0.12) {
+            const retry = await ctx.services.tasks.run<typeof r2>(
+              'pcb.route',
+              { board: b, parts: partsFor(p, b), opts: { nets: broken, grid: Math.max(0.1, grid0 / 2), maxTimeMs: a.maxTimeMs ?? 60_000, layers: copperLayers(b.stackup) } },
+              { signal: ctx.signal, timeoutMs: 5 * 60_000 },
+            );
+            if (retry.failed.length < r2.failed.length) r2 = retry;
+          }
           ctx.session.mutate(ctx, 'auto_route', () => {
             b.traces = r2.board.traces;
             b.vias = r2.board.vias;

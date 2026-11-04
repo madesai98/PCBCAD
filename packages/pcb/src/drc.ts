@@ -216,7 +216,17 @@ export function runDrc(board: Board, parts: Record<string, PartDef>): DesignIssu
         continue;
       }
       const out = court.find((p) => !insideBoard(p[0], p[1]));
-      if (out) add('warning', 'outside-board', `${c.ref} courtyard extends beyond the board edge`, out, { componentIds: [c.id] }, 'Intended for edge connectors; otherwise move the part inward.');
+      const part = parts[c.partId];
+      const edgeConnector = part?.category === 'connector' && !!part.connector?.matingDirection && part.connector.matingDirection !== '+z';
+      if (out)
+        add(
+          edgeConnector ? 'info' : 'warning',
+          'outside-board',
+          edgeConnector ? `${c.ref} overhangs the board edge (edge connector — intended)` : `${c.ref} courtyard extends beyond the board edge`,
+          out,
+          { componentIds: [c.id] },
+          edgeConnector ? undefined : 'Intended for edge connectors; otherwise move the part inward.',
+        );
     }
   }
 

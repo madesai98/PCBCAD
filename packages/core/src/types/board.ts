@@ -72,6 +72,28 @@ export interface ComponentInstance {
   behaviorId?: string;
   /** Per-instance simulation parameter overrides, e.g. {"closed": true} for a switch, {"V": 3.7} for a battery. */
   simOverrides?: Record<string, number | boolean | string>;
+  /**
+   * Power entering the product from the outside world through this component (typically a
+   * connector): a USB charger on VBUS, a bench supply on a barrel jack, a 24 V field supply on a
+   * terminal block. Simulated as a voltage source with internal resistance between `pin` and
+   * `groundPin` (default: the board ground).
+   */
+  supplies?: ExternalSupply[];
+}
+
+export interface ExternalSupply {
+  /** Pin number or name carrying the supply, e.g. "VBUS". */
+  pin: string;
+  /** Return pin (default: board ground net). */
+  groundPin?: string;
+  /** Open-circuit voltage (V). */
+  V: number;
+  /** Source resistance (Ω), default 0.05 (USB charger + cable). */
+  Rint?: number;
+  /** Source current limit (A), informational / for checks. */
+  Imax?: number;
+  /** Label, e.g. "USB-C 5 V charger". */
+  name?: string;
 }
 
 export interface Trace {

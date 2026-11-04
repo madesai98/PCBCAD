@@ -774,6 +774,39 @@ export function buildStructuralResult(
   const warnings = [...a.warnings, ...extraWarnings];
   if (!anyIncluded && n > 0)
     warnings.push('Every analysed voxel touches a fixture or concentrated load; reported maxima include singularities.');
+  // robust stress level and small-deflection sanity check
+  const sample: number[] = [];
+  let bx0 = Infinity;
+  let by0 = Infinity;
+  let bz0 = Infinity;
+  let bx1 = -Infinity;
+  let by1 = -Infinity;
+  let bz1 = -Infinity;
+  const { nx, ny } = a.grid;
+  for (let q = 0; q < n; q++) {
+    if (!a.analysed[q]) continue;
+    if (!a.singular[q] || !anyIncluded) sample.push(vm32[q]);
+    const v = a.solidIdx[q];
+    const i = v % nx;
+    const j = Math.floor(v / nx) % ny;
+    const k = Math.floor(v / (nx * ny));
+    if (i < bx0) bx0 = i;
+    if (i > bx1) bx1 = i;
+    if (j < by0) by0 = j;
+    if (j > by1) by1 = j;
+    if (k < bz0) bz0 = k;
+    if (k > bz1) bz1 = k;
+  }
+  sample.sort((x, y) => x - y);
+  const p99 = sample.length ? sample[Math.min(sample.length - 1, Math.floor(0.99 * sample.length))] : 0;
+  const size = sample.length ? Math.max(bx1 - bx0 + 1, by1 - by0 + 1, bz1 - bz0 + 1) * a.grid.h : 0;
+  const maxDisp = Math.max(a.maxNodeDisplacement * s, maxDispVoxel);
+  if (size > 0 && maxDisp > 0.02 * size)
+    warnings.push(
+      `Large deflection: ${maxDisp.toFixed(2)} mm is ${((100 * maxDisp) / size).toFixed(1)} % of the part size (${size.toFixed(1)} mm); ` +
+        'the linear small-deflection result is not reliable there. Check for parts joined only by a few voxels, ' +
+        'loads applied to unsupported thin walls, or missing fixtures.',
+    );
   return {
     kind: 'structural',
     title: meta.title,
@@ -783,7 +816,7 @@ export function buildStructuralResult(
     vonMises: pack(vm32, 'f32'),
     displacement: pack(d32, 'f32'),
     maxVonMises: smMax,
-    maxDisplacement: Math.max(a.maxNodeDisplacement * s, maxDispVoxel),
+    maxDisplacement: maxDisp,
     minSafetyFactor: cap(smSF),
     maxStressAt: at(smAt),
     loads: [...meta.loads],
@@ -793,6 +826,7 @@ export function buildStructuralResult(
     materials,
     raw: { maxVonMises: rawMax, minSafetyFactor: cap(rawSF), maxStressAt: at(rawAt) },
     singularityExcludedVoxels: anyIncluded ? excluded : 0,
+    vonMisesP99: p99,
     appliedForce: [a.appliedForce[0] * scale, a.appliedForce[1] * scale, a.appliedForce[2] * scale],
     bodies: { ...a.bodies },
     warnings,

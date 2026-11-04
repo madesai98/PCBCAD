@@ -116,7 +116,9 @@ export function runErc(board: Board, parts: Record<string, PartDef>): DesignIssu
       add('warning', 'single-pin-net', `Net ${name} has only one pin (${p.comp.ref}.${p.pin})`, { netIds: [netId], componentIds: [p.comp.id] }, 'Connect it to something or remove the net.');
     }
     const drivers = pins.filter((p) => p.type === 'output' || p.type === 'power_out');
-    if (drivers.length >= 2) {
+    // several output pins of the SAME component on one net (e.g. a regulator's VOUT pin + its
+    // VOUT tab) are one driver, not a conflict
+    if (new Set(drivers.map((d) => d.comp.id)).size >= 2) {
       add(
         'error',
         'output-conflict',

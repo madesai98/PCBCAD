@@ -244,6 +244,10 @@ async function buildDemoProduct(ctx: DemoContext) {
     }),
   );
 
+  await ctx.step('The product is powered from a USB-C charger, so I declare J1.VBUS as an external 5 V supply (50 mΩ source resistance, 3 A) — simulations use it as the power source.', () =>
+    ctx.call('set_external_supply', { boardId: 'Main', ref: 'J1', supplies: [{ pin: 'VBUS', V: 5, Rint: 0.05, Imax: 3, name: 'USB-C charger' }] }),
+  );
+
   await ctx.step('Now the probe: a matching JST-PH connector, the BME280 in I²C mode (CSB high, SDO low → address 0x76) and its decoupling capacitor.', async () => {
     await ctx.call('add_components', {
       boardId: 'Probe',
@@ -362,35 +366,50 @@ async function buildDemoProduct(ctx: DemoContext) {
     await ctx.say(`${firstLine(r)}.${uart.length ? ` Serial console:\n\n\`\`\`\n${uart.join('\n')}\n\`\`\`` : ''}`);
   });
 
-  await ctx.step('Designing the enclosure: a two-part PC/ABS injection-molded housing around the main board with heat-set-insert bosses under the mounting holes, a USB-C cut-out, a cable exit for the probe and vent slots.', async () => {
+  let encl = { w: 0, d: 0, h: 0, baseId: '' };
+  await ctx.step('Designing the enclosure: a two-part PC/ABS injection-molded housing around the main board — heat-set-insert bosses under the mounting holes, M3 case screws, a USB-C cut-out, a cable exit for the probe, and vent slots in the top and bottom (a natural-convection chimney that molds without side actions).', async () => {
     const r = await ctx.call('create_enclosure', {
       boardIds: ['Main'],
       materialId: 'pc-abs',
       process: 'injection-molding',
       wall: 2,
+      clearance: 1,
       insert: 'heat-set',
-      ventFaces: ['+y', '-y'],
+      ventFaces: ['top', 'bottom'],
       color: '#e8e6e1',
-      screwPart: 'M3x8-ISO7380',
-      insertPart: 'INSERT-M3x4',
+      screwPart: 'fastener:iso7380-m3x8',
+      insertPart: 'fastener:insert-m3x5.7-od4.6',
     });
+    const m = /Enclosure base \[(mech_[a-z0-9]+)\] base: ([\d.]+)×([\d.]+)×([\d.]+) mm/.exec(r);
+    const c = /cover: [\d.]+×[\d.]+×([\d.]+) mm/.exec(r);
+    if (m) encl = { baseId: m[1], w: +m[2], d: +m[3], h: +m[4] + (c ? +c[1] : 0) };
     await ctx.say(r.split('\n').slice(1, 3).join(' '));
   });
 
-  await ctx.step('Adding a 1.5 mm aluminium 5052-H32 wall-mount bracket (L-shape, M3 holes for the enclosure and the wall), anodised black.', async () => {
+  await ctx.step('Adding a 1.5 mm aluminium 5052-H32 wall bracket, anodised black: the enclosure sits on its shelf and is screwed up into two new heat-set-insert bosses in the base; the upright flange screws to the wall.', async () => {
+    if (!encl.baseId) return;
+    const t = 1.5;
+    const len = 16;
+    const yc = encl.d / 2 + 0.2 + t - len / 2; // flange inner face 0.2 mm behind the enclosure's back face
+    const z0 = -(t + 0.2);
     await ctx.call('create_sheet_metal_part', {
       name: 'Wall bracket',
       materialId: 'al-5052-h32',
-      thickness: 1.5,
-      base: { width: 40, length: 30 },
-      flanges: [{ edge: '+y', length: 30, angle: 90, holes: [{ x: -10, y: 20, diameter: 4.2 }, { x: 10, y: 20, diameter: 4.2 }] }],
+      thickness: t,
+      base: { width: 40, length: len },
+      flanges: [{ edge: '+y', length: Math.round(encl.h + 5), angle: 90, holes: [{ x: -12, y: Math.round(encl.h * 0.7), diameter: 4.5 }, { x: 12, y: Math.round(encl.h * 0.7), diameter: 4.5 }] }],
       holes: [
-        { x: -12, y: -5, diameter: 3.4 },
-        { x: 12, y: -5, diameter: 3.4 },
+        { x: -10, y: -2, diameter: 3.4 },
+        { x: 10, y: -2, diameter: 3.4 },
       ],
       finish: 'anodized-black',
-      position: [0, 0, -12],
+      position: [0, yc, z0],
     });
+    const yb = yc - 2;
+    for (const x of [-10, 10])
+      await ctx.call('add_shell_feature', { partId: encl.baseId, type: 'boss', params: { x, y: yb, outerDiameter: 8, holeDiameter: 4, height: 5, kind: 'insert', throughFloor: true, gussets: 2, fastenerPartId: 'fastener:insert-m3x4-od4.6' } });
+    await ctx.call('add_fastener', { part: 'fastener:insert-m3x4-od4.6', position: [-10, yb, 7], positions: [[10, yb, 7]], direction: [0, 0, -1], note: 'Bracket inserts' });
+    await ctx.call('add_fastener', { part: 'fastener:iso7380-m3x8', position: [-10, yb, z0], positions: [[10, yb, z0]], direction: [0, 0, 1], note: 'Bracket to enclosure' });
   });
 
   await ctx.step('Manufacturability review of the molded shells, the bracket and the assembly.', async () => {
@@ -407,7 +426,7 @@ async function buildDemoProduct(ctx: DemoContext) {
     const r = await ctx.call('simulate_structural', {
       partIds: [id],
       fixtures: [{ kind: 'face', face: '+y', depth: 2 }],
-      loads: [{ kind: 'force', region: { kind: 'box', min: [-20, -15, 0], max: [20, 0, 1.5] }, vector: [0, 0, -20] }],
+      loads: [{ kind: 'force', region: { kind: 'box', min: [-20, -8, 0], max: [20, 0, 1.5] }, vector: [0, 0, -20] }],
     });
     await ctx.say(firstLine(r));
   });

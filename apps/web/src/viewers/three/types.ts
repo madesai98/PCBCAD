@@ -3,11 +3,14 @@ import type { AirflowResult, MeshData, PcbThermalResult, Project, StructuralResu
 /** Async mesh provider: `mech:<partId>`, `fastener:<partId>`, or a Model3D meshAssetId. */
 export type GetMesh = (key: string) => Promise<MeshData | null>;
 
-/** What a click in the 3D view selects (shape-compatible with the app's selection model). */
+/**
+ * What a click in the 3D view selects (shape-compatible with the app's selection model).
+ * Mechanical parts → 'mech', board components → 'component', fasteners → 'part' (their PartDef).
+ * Clicking a bare board surface or empty space yields null (deselect).
+ */
 export type Assembly3DSelection =
   | { kind: 'mech'; partId: string; instanceId?: string }
   | { kind: 'component'; boardId: string; componentId: string }
-  | { kind: 'board'; boardId: string; instanceId?: string }
   | { kind: 'part'; partId: string; fastenerId: string };
 
 export interface Assembly3DOverlay {

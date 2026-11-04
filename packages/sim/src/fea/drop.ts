@@ -1,5 +1,6 @@
 import type { DropResult, Vec3 } from '@pcbcad/core';
 import { resolveRegion } from './regions';
+import type { RegionGrid } from './regions';
 import { analyzeStructure, buildStructuralResult } from './structural';
 import type { StructuralResultDetail, DropFloor, DropOrientation, DropSetup, Region, StructuralLoad } from './types';
 
@@ -48,6 +49,8 @@ export interface DropResultDetail extends DropResult {
   /** Unit vector toward the floor (grid frame). */
   direction: Vec3;
   impactPatchVoxels: number;
+  /** How each extra mass was attached: its support region, the drop path (ray along the drop direction) or the nearest solid. */
+  massAttachments: { ref: string; method: 'support' | 'drop-path' | 'nearest'; voxels: number }[];
   warnings: string[];
 }
 
@@ -83,6 +86,7 @@ export function solveDrop(setup: DropSetup): DropResultDetail {
   if (!grid.cells || grid.cells.length !== nx * ny * nz) throw new Error('drop: grid.cells length must equal nx·ny·nz');
   const mats = setup.materials ?? [];
   const usable = (idx: number) => idx > 0 && !!mats[idx - 1] && mats[idx - 1].E > 0;
+  const preWarnings: string[] = [];
 
   // ---- impact patch (fixture)
   let fixture: Region;
@@ -118,38 +122,113 @@ export function solveDrop(setup: DropSetup): DropResultDetail {
     fixture = map[setup.orientation];
   }
 
-  // ---- extra masses → force loads on their nearest solid voxels (unit 1 g case)
+  // ---- extra masses → inertial force on their load path (unit 1 g case)
   const extra = setup.extraMasses ?? [];
+  const solidMask = new Uint8Array(N);
   const solidList: number[] = [];
-  for (let v = 0; v < N; v++) if (usable(grid.cells[v])) solidList.push(v);
+  for (let v = 0; v < N; v++)
+    if (usable(grid.cells[v])) {
+      solidMask[v] = grid.cells[v];
+      solidList.push(v);
+    }
+  const rg: RegionGrid = { nx, ny, nz, h, origin, solid: solidMask };
+  const centre = (v: number): Vec3 => [
+    origin[0] + ((v % nx) + 0.5) * h,
+    origin[1] + ((Math.floor(v / nx) % ny) + 0.5) * h,
+    origin[2] + (Math.floor(v / (nx * ny)) + 0.5) * h,
+  ];
+  /** First solid voxel met when moving from p along the drop direction (where the mass presses), −1 if none. */
+  const rayHit = (p: Vec3): number => {
+    let reach = 0;
+    for (const cx of [origin[0], origin[0] + nx * h])
+      for (const cy of [origin[1], origin[1] + ny * h])
+        for (const cz of [origin[2], origin[2] + nz * h]) reach = Math.max(reach, Math.hypot(cx - p[0], cy - p[1], cz - p[2]));
+    const step = 0.25 * h;
+    for (let t = 0; t <= reach + h; t += step) {
+      const i = Math.floor((p[0] + t * d[0] - origin[0]) / h);
+      const j = Math.floor((p[1] + t * d[1] - origin[1]) / h);
+      const k = Math.floor((p[2] + t * d[2] - origin[2]) / h);
+      if (i < 0 || j < 0 || k < 0 || i >= nx || j >= ny || k >= nz) continue;
+      const v = i + nx * (j + ny * k);
+      if (solidMask[v]) return v;
+    }
+    return -1;
+  };
+  const nearestSolid = (p: Vec3): number => {
+    let best = Infinity;
+    let bv = -1;
+    for (const v of solidList) {
+      const c = centre(v);
+      const dd = (c[0] - p[0]) ** 2 + (c[1] - p[1]) ** 2 + (c[2] - p[2]) ** 2;
+      if (dd < best) {
+        best = dd;
+        bv = v;
+      }
+    }
+    return bv;
+  };
+  const seen = new Uint8Array(N);
+  /** Face-connected solid voxels within radius R (mm) of the centre of voxel v0. */
+  const patchAround = (v0: number, R: number): number[] => {
+    const c0 = centre(v0);
+    const out: number[] = [v0];
+    seen[v0] = 1;
+    for (let q = 0; q < out.length; q++) {
+      const v = out[q];
+      const i = v % nx;
+      const j = Math.floor(v / nx) % ny;
+      const k = Math.floor(v / (nx * ny));
+      const nbs = [i > 0 ? v - 1 : -1, i < nx - 1 ? v + 1 : -1, j > 0 ? v - nx : -1, j < ny - 1 ? v + nx : -1, k > 0 ? v - nx * ny : -1, k < nz - 1 ? v + nx * ny : -1];
+      for (const nb of nbs) {
+        if (nb < 0 || seen[nb] || !solidMask[nb]) continue;
+        const c = centre(nb);
+        if (Math.hypot(c[0] - c0[0], c[1] - c0[1], c[2] - c0[2]) > R) continue;
+        seen[nb] = 1;
+        out.push(nb);
+      }
+    }
+    for (const v of out) seen[v] = 0;
+    return out.sort((x, y) => x - y);
+  };
+  const supportCache = new Map<Region, number[]>();
   const extraCells: number[][] = [];
+  const attachments: DropResultDetail['massAttachments'] = [];
   const loads: StructuralLoad[] = [];
   let extraMassG = 0;
   extra.forEach((em, ei) => {
     if (!(em.massGrams >= 0) || !Number.isFinite(em.massGrams)) throw new Error(`drop: extraMasses[${ei}].massGrams must be ≥ 0`);
     if (!em.position || !em.position.every((c) => Number.isFinite(c))) throw new Error(`drop: extraMasses[${ei}].position must be a finite Vec3`);
     extraMassG += em.massGrams;
-    let best = Infinity;
-    const dist = new Float64Array(solidList.length);
-    for (let q = 0; q < solidList.length; q++) {
-      const v = solidList[q];
-      const i = v % nx;
-      const j = Math.floor(v / nx) % ny;
-      const k = Math.floor(v / (nx * ny));
-      const dd = Math.hypot(
-        origin[0] + (i + 0.5) * h - em.position[0],
-        origin[1] + (j + 0.5) * h - em.position[1],
-        origin[2] + (k + 0.5) * h - em.position[2],
-      );
-      dist[q] = dd;
-      if (dd < best) best = dd;
+    const label = em.ref ?? em.componentId ?? `mass ${ei}`;
+    let cells: number[] = [];
+    let method: 'support' | 'drop-path' | 'nearest' = 'drop-path';
+    if (em.support) {
+      let sc = supportCache.get(em.support);
+      if (!sc) {
+        sc = Array.from(resolveRegion(rg, em.support).voxels);
+        supportCache.set(em.support, sc);
+        if (!sc.length) preWarnings.push(`Support region of ${label} selects no solid voxels; its load is applied along the drop path instead.`);
+      }
+      if (sc.length) {
+        cells = sc;
+        method = 'support';
+      }
     }
-    const cl: number[] = [];
-    for (let q = 0; q < solidList.length; q++) if (dist[q] <= best + 1.01 * h) cl.push(solidList[q]);
-    extraCells.push(cl);
-    if (em.massGrams > 0 && cl.length > 0) {
+    if (!cells.length && solidList.length) {
+      // footprint radius of a compact part (cube of density ≈ 2 g/cm³), at least 3 voxels / 4 mm
+      const R = Math.max(3 * h, 4, 5 * Math.cbrt(Math.max(em.massGrams, 0) / 2));
+      let v0 = rayHit(em.position);
+      if (v0 < 0) {
+        v0 = nearestSolid(em.position);
+        method = 'nearest';
+      }
+      if (v0 >= 0) cells = patchAround(v0, R);
+    }
+    extraCells.push(cells);
+    attachments.push({ ref: label, method, voxels: cells.length });
+    if (em.massGrams > 0 && cells.length > 0) {
       const f = (em.massGrams / 1000) * G0;
-      loads.push({ region: { kind: 'cells', indices: cl }, force: [f * d[0], f * d[1], f * d[2]] });
+      loads.push({ region: { kind: 'cells', indices: cells }, force: [f * d[0], f * d[1], f * d[2]] });
     }
   });
 
@@ -163,12 +242,8 @@ export function solveDrop(setup: DropSetup): DropResultDetail {
     tolerance: setup.tolerance,
     onProgress: setup.onProgress,
   });
-  const warnings: string[] = [];
-  if (fixture.kind === 'plane') {
-    const solid = new Uint8Array(N);
-    for (const v of solidList) solid[v] = grid.cells[v];
-    patchVoxels = resolveRegion({ nx, ny, nz, h, origin, solid }, fixture).voxels.length;
-  }
+  const warnings: string[] = [...preWarnings];
+  if (fixture.kind === 'plane') patchVoxels = resolveRegion(rg, fixture).voxels.length;
 
   // ---- structural stiffness from the unit (1 g) solve
   let mA = 0; // analysed mass (g)
@@ -270,6 +345,7 @@ export function solveDrop(setup: DropSetup): DropResultDetail {
     floor,
     direction: d,
     impactPatchVoxels: patchVoxels,
+    massAttachments: attachments,
     warnings: structural.warnings,
   };
 }

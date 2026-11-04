@@ -1,5 +1,5 @@
 import { copperLayers, newId, type Board, type CopperLayer, type PartDef, type Project, type Vec2 } from '@pcbcad/core';
-import { boardStats, runDrc } from '@pcbcad/pcb';
+import { boardStats, connectivity, runDrc } from '@pcbcad/pcb';
 import { boardSize, requireBoard, requireComponent } from '../helpers';
 import { S, ToolError, type ToolContext, type ToolDef } from '../registry';
 import { formatIssues, setIssues } from './project';
@@ -166,8 +166,30 @@ export const layoutTools: ToolDef[] = [
         return `Routed ${r.routed.length} nets on ${b.name} (${r.stats.vias} vias, ${r.stats.lengthMm.toFixed(0)} mm)${r.failed.length ? `, ${r.failed.length} failed` : ''}`;
       });
       await refillZones(ctx, b);
+      // Nets skipped because a pour should join them: if the pour leaves islands (pads cut off by
+      // other copper, or top/bottom pours not stitched), route those nets too.
+      let stitched = '';
+      if (skip?.length) {
+        const conn = connectivity(b, partsFor(p, b));
+        const broken = skip.filter((id) => (conn.get(id)?.length ?? 1) > 1);
+        if (broken.length) {
+          const r2 = await ctx.services.tasks.run<{ board: Board; routed: string[]; failed: { netId: string; name: string; reason: string }[]; stats: { segments: number; vias: number; lengthMm: number; timeMs: number } }>(
+            'pcb.route',
+            { board: b, parts: partsFor(p, b), opts: { nets: broken, grid: a.grid, maxTimeMs: a.maxTimeMs ?? 60_000, layers: copperLayers(b.stackup) } },
+            { signal: ctx.signal, timeoutMs: 5 * 60_000 },
+          );
+          ctx.session.mutate(ctx, 'auto_route', () => {
+            b.traces = r2.board.traces;
+            b.vias = r2.board.vias;
+            return `Stitched ${broken.length} poured net(s) on ${b.name} (${r2.stats.vias} vias)`;
+          });
+          await refillZones(ctx, b);
+          const names = broken.map((id) => b.nets.find((n) => n.id === id)?.name ?? id).join(', ');
+          stitched = `\nThe copper pour alone left ${names} split into islands, so those connections were routed as traces too${r2.failed.length ? ` (still failing: ${r2.failed.map((f) => f.name).join(', ')})` : ''}.`;
+        }
+      }
       const drc = runDrcFor(ctx, b);
-      return `Routed ${r.routed.length} net(s) in ${(r.stats.timeMs / 1000).toFixed(1)} s: ${r.stats.segments} segments, ${r.stats.vias} vias, ${r.stats.lengthMm.toFixed(0)} mm.${r.failed.length ? `\nFailed: ${r.failed.map((f) => `${f.name} (${f.reason})`).join('; ')}\nTips: move parts apart, add a GND pour, use 4 layers, or route manually with add_trace.` : ''}\n${drc}`;
+      return `Routed ${r.routed.length} net(s) in ${(r.stats.timeMs / 1000).toFixed(1)} s: ${r.stats.segments} segments, ${r.stats.vias} vias, ${r.stats.lengthMm.toFixed(0)} mm.${r.failed.length ? `\nFailed: ${r.failed.map((f) => `${f.name} (${f.reason})`).join('; ')}\nTips: move parts apart, add a GND pour, use 4 layers, or route manually with add_trace.` : ''}${stitched}\n${drc}`;
     },
   },
   {

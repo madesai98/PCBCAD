@@ -59,6 +59,7 @@ const T: Record<string, ToolInfo> = {
   update_component: { title: 'Updated component', icon: Cpu, tone: 'schematic' },
   remove_components: { title: 'Removed components', icon: Cpu, tone: 'schematic' },
   connect: { title: 'Wired nets', icon: Zap, tone: 'schematic' },
+  set_external_supply: { title: 'External power input', icon: Plug, tone: 'schematic' },
   disconnect: { title: 'Disconnected pins', icon: Zap, tone: 'schematic' },
   set_net: { title: 'Net properties', icon: Zap, tone: 'schematic' },
   get_netlist: { title: 'Read netlist', icon: Zap, tone: 'schematic' },

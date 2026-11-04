@@ -96,6 +96,13 @@ interface FaceAxis {
   aP: Float64Array;
   b: Float64Array;
   d: Float64Array;
+  /** Fan-curve pressure-jump source per face of this axis (N, signed) and its linear drag (kg/s). */
+  fanB?: Float64Array;
+  fanAP?: Float64Array;
+  /** Per active face: fan-curve source/drag (copied from fanB/fanAP) and Borda–Carnot vent loss K. */
+  actFanB?: Float64Array;
+  actFanAP?: Float64Array;
+  lossK: Float64Array;
   /** Pressure-matrix positions per active face (−1 when not applicable). */
   pLL: Int32Array;
   pUU: Int32Array;
@@ -177,9 +184,16 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
   }
   const openings = setup.openings ?? [];
   const openOf = new Int16Array(N).fill(-1);
+  /** 1 for cells of an opening of kind 'ambient' (outside air around the product). */
+  const ambientCell = new Uint8Array(N);
+  /** Porosity (0, 1] of the opening a cell belongs to; 0 = not given (no vent loss). */
+  const porOf = new Float64Array(N);
   openings.forEach((o, oi) => {
     let used = 0;
     let bad = 0;
+    const isAmbient = o.kind === 'ambient';
+    const phi = o.porosity != null && Number.isFinite(o.porosity) && o.porosity > 0 ? Math.min(1, Math.max(0.01, o.porosity)) : 0;
+    if (o.porosity != null && !(o.porosity > 0)) warnings.push(`Opening '${o.name}': porosity ${o.porosity} ignored (must be > 0).`);
     for (let q = 0; q < o.cells.length; q++) {
       const c = o.cells[q];
       if (!Number.isInteger(c) || c < 0 || c >= N || type[c] === SOLID) {
@@ -189,6 +203,8 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
       if (openOf[c] >= 0) continue;
       type[c] = OPEN;
       openOf[c] = oi;
+      if (isAmbient) ambientCell[c] = 1;
+      if (phi > 0) porOf[c] = phi;
       used++;
     }
     if (bad) warnings.push(`Opening '${o.name}': ${bad} cells are solid or out of range and were ignored.`);
@@ -252,6 +268,7 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
   const fans = setup.fans ?? [];
   let fanFlow = 0;
   const fanSeeds: number[] = [];
+  const fanInfo: { name: string; ax: number; faces: number[]; layers: number; sgn: number }[] = [];
   for (const fan of fans) {
     const dir = fan.direction ?? [0, 0, 1];
     if (!Number.isFinite(fan.flowM3s)) throw new Error(`airflow: fan '${fan.name}' flowM3s must be finite`);
@@ -275,7 +292,11 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
     }
     const U = fan.flowM3s / (proj.size * A);
     const F = axes[a];
-    let fixed = 0;
+    // fan curve Δp = pmax (1 − Q/Qmax) as a pressure-jump source on the fan faces (stay ACTIVE)
+    const pmax = fan.maxPressurePa != null && Number.isFinite(fan.maxPressurePa) ? fan.maxPressurePa : 0;
+    const curve = pmax > 0 && fan.flowM3s > 0;
+    const usable = (f: number) => f >= 0 && (curve ? F.state[f] === ACTIVE : F.state[f] === ACTIVE || F.state[f] === FIXED);
+    const faces: number[] = [];
     for (const c of cells) {
       const co = cellIJK(c);
       const down: [number, number, number] = [co[0], co[1], co[2]];
@@ -283,15 +304,25 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
       if (sgn > 0) down[a] += 1;
       else up[a] += 1;
       let f = faceIndex(a, down[0], down[1], down[2]);
-      if (f < 0 || (F.state[f] !== ACTIVE && F.state[f] !== FIXED)) f = faceIndex(a, up[0], up[1], up[2]);
-      if (f < 0 || (F.state[f] !== ACTIVE && F.state[f] !== FIXED)) continue;
-      F.state[f] = FIXED;
-      F.vel[f] = sgn * U;
-      fixed++;
+      if (!usable(f)) f = faceIndex(a, up[0], up[1], up[2]);
+      if (!usable(f)) continue;
+      if (curve) {
+        F.fanB ??= new Float64Array(F.n);
+        F.fanAP ??= new Float64Array(F.n);
+        F.fanB[f] += sgn * A * pmax;
+        F.fanAP[f] += (A * pmax) / Math.abs(U);
+      } else {
+        F.state[f] = FIXED;
+        F.vel[f] = sgn * U;
+      }
+      faces.push(f);
       fanSeeds.push(c);
     }
-    if (!fixed) warnings.push(`Fan '${fan.name}': no open face in the blowing direction; ignored.`);
-    else if (fan.flowM3s !== 0) fanFlow += Math.abs(fan.flowM3s);
+    if (!faces.length) warnings.push(`Fan '${fan.name}': no open face in the blowing direction; ignored.`);
+    else {
+      if (fan.flowM3s !== 0) fanFlow += Math.abs(fan.flowM3s);
+      fanInfo.push({ name: fan.name, ax: a, faces, layers: Math.max(1, faces.length / proj.size), sgn });
+    }
   }
   const mode: 'natural' | 'forced' = fanFlow > 0 ? 'forced' : 'natural';
 
@@ -325,6 +356,18 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
     F.aP = new Float64Array(nA);
     F.b = new Float64Array(nA);
     F.d = new Float64Array(nA);
+    if (F.fanB && F.fanAP) {
+      F.actFanB = Float64Array.from(F.act, (f) => F.fanB![f]);
+      F.actFanAP = Float64Array.from(F.act, (f) => F.fanAP![f]);
+    }
+    F.lossK = new Float64Array(nA);
+    for (let q = 0; q < nA; q++) {
+      const oL = type[F.cellL[q]] === OPEN;
+      const oU = type[F.cellU[q]] === OPEN;
+      if (oL === oU) continue;
+      const phi = porOf[oL ? F.cellL[q] : F.cellU[q]];
+      if (phi > 0) F.lossK[q] = (1 / (0.62 * phi) - 1) ** 2; // Borda–Carnot loss of the sub-voxel vent
+    }
     const t0ax = ax === 0 ? 1 : 0;
     const t1ax = ax === 2 ? 1 : 2;
     for (let q = 0; q < nA; q++) {
@@ -462,6 +505,7 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
     if (k < nz - 1) push(c + NXY);
   });
   const eFaceCount = (nx - 1) * ny * nz + nx * (ny - 1) * nz + nx * ny * (nz - 1);
+  const extFaces = new Uint8Array(N); // solid faces touching 'ambient' opening cells
   const eAx = new Uint8Array(eFaceCount);
   const eF = new Int32Array(eFaceCount);
   const eG = new Float64Array(eFaceCount);
@@ -481,7 +525,10 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
             eF[q] = f;
             const kp = kCell[cP];
             const kn = kCell[cN];
-            eG[q] = (A * 2 * kp * kn) / ((kp + kn) * hm);
+            if ((type[cP] === SOLID && ambientCell[cN]) || (type[cN] === SOLID && ambientCell[cP])) {
+              eG[q] = 0; // outer surface: exchanges with ambient through externalH (below)
+              extFaces[type[cP] === SOLID ? cP : cN]++;
+            } else eG[q] = (A * 2 * kp * kn) / ((kp + kn) * hm);
             ePos[4 * q] = Ae.diag[cP];
             ePos[4 * q + 1] = Ae.diag[cN];
             ePos[4 * q + 2] = findPos(Ae, cP, cN);
@@ -490,7 +537,8 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
           }
     }
   }
-  // external loss of solid cells on the domain boundary: half-cell conduction and h_ext in series
+  // external loss of solid cells on the domain boundary or touching 'ambient' opening cells:
+  // half-cell conduction and h_ext in series
   const gExt = new Float64Array(N);
   let boundarySolid = 0;
   if (hExt > 0)
@@ -499,7 +547,8 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
       const i = cellCoords[3 * c];
       const j = cellCoords[3 * c + 1];
       const k = cellCoords[3 * c + 2];
-      const nb = (i === 0 ? 1 : 0) + (i === nx - 1 ? 1 : 0) + (j === 0 ? 1 : 0) + (j === ny - 1 ? 1 : 0) + (k === 0 ? 1 : 0) + (k === nz - 1 ? 1 : 0);
+      const nb =
+        (i === 0 ? 1 : 0) + (i === nx - 1 ? 1 : 0) + (j === 0 ? 1 : 0) + (j === ny - 1 ? 1 : 0) + (k === 0 ? 1 : 0) + (k === nz - 1 ? 1 : 0) + extFaces[c];
       if (!nb) continue;
       gExt[c] = (nb * A) / (1 / hExt + hm / 2 / kCell[c]);
       boundarySolid++;
@@ -642,7 +691,9 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
 
   function assembleMomentum(F: FaceAxis): void {
     const ax = F.ax;
-    const { act, cellL, cellU, nbIdx, nbType, fluxIdx, aNb, aP, b, d, vel } = F;
+    const { act, cellL, cellU, nbIdx, nbType, fluxIdx, aNb, aP, b, d, vel, lossK } = F;
+    const fanB = F.actFanB;
+    const fanAP = F.actFanAP;
     const v0 = axes[ax === 0 ? 1 : 0].vel;
     const v1 = axes[ax === 2 ? 1 : 2].vel;
     const dirT0 = 2 * (ax === 0 ? 1 : 0);
@@ -710,6 +761,12 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
             bSum += a * vn;
           }
         }
+      }
+      const K = lossK[q];
+      if (K > 0) apSum += 0.5 * rho * K * Math.abs(uP) * A; // vent loss ½ρK|u|u·A (Picard-linearised)
+      if (fanB) {
+        apSum += fanAP![q];
+        bSum += fanB[q];
       }
       const cl = cellL[q];
       const cu = cellU[q];
@@ -933,6 +990,23 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
     };
   });
 
+  // fan operating points: mean flow per fan layer and static pressure rise across the fan faces
+  const fanResults = fanInfo.map((fi) => {
+    const F = axes[fi.ax];
+    let flux = 0;
+    let dp = 0;
+    for (const f of fi.faces) {
+      flux += fi.sgn * F.vel[f] * A;
+      const i = f % F.FD[0];
+      const j = Math.floor(f / F.FD[0]) % F.FD[1];
+      const k = Math.floor(f / (F.FD[0] * F.FD[1]));
+      const cU = i + nx * (j + ny * k);
+      const cL = cU - CS[fi.ax];
+      dp += fi.sgn * (p[cU] - p[cL]);
+    }
+    return { name: fi.name, flowM3s: flux / fi.layers, pressureRisePa: dp / fi.faces.length };
+  });
+
   // streamlines (mm): seeds at inflowing opening cells, fans and the hottest air next to heat sources
   const inflow: { c: number; m: number }[] = [];
   for (let c = 0; c < N; c++) if (type[c] === OPEN && imb[c] > 0) inflow.push({ c, m: imb[c] });
@@ -981,6 +1055,7 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
     streamlines,
     components,
     vents,
+    fans: fanResults,
     maxAirTemp: maxAir,
     meanAirTemp: sumAir / nAir,
     maxSolidTemp: maxSolid,

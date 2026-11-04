@@ -303,15 +303,15 @@ const CAP = (c: CapRow): PartDef =>
     }),
   );
 
-const LED0603 = (id: string, mpn: string, color: string, colorName: string, vf: number, ifA: number, lib: 'basic' | 'extended', params: Record<string, string>, dsHash: string): PartDef =>
+const chipLed = (id: string, mpn: string, size: '0603' | '0805', color: string, colorName: string, vf: number, ifA: number, lib: 'basic' | 'extended', params: Record<string, string>, dsHash: string, mass: number): PartDef =>
   withThermal(
     catalogPart({
       id,
       mpn,
       manufacturer: 'Hubei KENTO Elec',
-      description: `${colorName} LED, 0603 (1.6 × 0.8 mm), water-clear lens`,
+      description: `${colorName} LED, ${size} (${size === '0603' ? '1.6 × 0.8' : '2.0 × 1.25'} mm), water-clear lens`,
       category: 'led',
-      package: '0603',
+      package: size,
       value: colorName,
       params,
       offers: lcscOffers(id, lib),
@@ -319,14 +319,14 @@ const LED0603 = (id: string, mpn: string, color: string, colorName: string, vf: 
         ['1', 'K'],
         ['2', 'A'],
       ]),
-      spec: { family: 'chip', size: '0603', bodyH: 0.6, extra: { polarized: true } },
+      spec: { family: 'chip', size, bodyH: size === '0603' ? 0.6 : 0.8, extra: { polarized: true } },
       bodyColor: color,
       datasheetUrl: ds(dsHash, id),
-      massGrams: 0.023,
+      massGrams: mass,
       notes: ['Footprint pin 1 = cathode (K).'],
       extra: { sim: { kind: 'led', anode: '2', cathode: '1', Vf: vf, If: ifA, color: colorName.toLowerCase() }, ratings: { current: 0.02, tempMin: -40, tempMax: 85 } },
     }),
-    { thetaJA: 500, tjMax: 100 },
+    { thetaJA: size === '0603' ? 500 : 400, tjMax: 100 },
   );
 
 /* ------------------------------------------------------------------------------- discretes */
@@ -463,6 +463,31 @@ function tact6x6(): PartDef {
     massGrams: 0.575,
     notes: ['Pins 1–2 and 3–4 are internally connected; pressing connects 1/2 to 3/4.'],
     extra: { sim: { kind: 'switch', a: '1', b: '3', closed: false, Ron: 0.1 }, ratings: { voltage: 12, current: 0.05, tempMin: -25, tempMax: 85 } },
+  });
+}
+
+function tact5x5(): PartDef {
+  return catalogPart({
+    id: 'C318884',
+    mpn: 'TS-1187A-B-A-B',
+    manufacturer: 'XKB Connection',
+    description: 'Tactile switch SPST-NO 5.1 × 5.1 × 1.5 mm, SMD, 1.6 N, 50 mA 12 V, 100k cycles',
+    category: 'button',
+    package: 'SMD-4P,5.1x5.1mm',
+    params: { Circuit: 'SPST', 'Operating Force': '1.6N', 'Contact Current': '50mA', 'Voltage Rating': '12V', Life: '100,000 cycles', 'Switch Height': '1.5mm', Length: '5.1mm', Width: '5.1mm', 'Mounting Type': 'Surface Mount,Vertical' },
+    offers: lcscOffers('C318884', 'basic'),
+    pins: pinList([
+      ['1', '1'],
+      ['2', '2'],
+      ['3', '3'],
+      ['4', '4'],
+    ]),
+    // lands after the LCSC library footprint (1.0 × 0.75 mm at ±3.0 / ±1.85), drawn with leads along Y
+    spec: { family: 'tactile-switch', bodyW: 5.1, bodyL: 5.1, bodyH: 1.5, pitch: 3.7, leadSpan: 7.0, padW: 0.75, padH: 1.0, extra: { smd: true, padCenter: 3.0 } },
+    datasheetUrl: ds('56c8799ae5193945a16a1ffbe378246a', 'C318884'),
+    massGrams: 0.028,
+    notes: ['Pins 1–2 and 3–4 are internally connected; pressing connects 1/2 to 3/4.'],
+    extra: { sim: { kind: 'switch', a: '1', b: '3', closed: false, Ron: 0.1 }, ratings: { voltage: 12, current: 0.05, tempMin: -30, tempMax: 85 } },
   });
 }
 
@@ -650,13 +675,15 @@ export const BUILTIN_PARTS: PartDef[] = [
   CAP({ id: 'C15850', mpn: 'CL21A106KAYNNNE', manufacturer: 'Samsung Electro-Mechanics', value: '10uF', farads: 10e-6, size: '0805', volts: 25, dielectric: 'X5R', tol: '±10%', height: 1.25, dsHash: '02336ea48ea44ca18c72517dd3cb7b47' }),
   CAP({ id: 'C1653', mpn: 'CL10C220JB8NNNC', manufacturer: 'Samsung Electro-Mechanics', value: '22pF', farads: 22e-12, size: '0603', volts: 50, dielectric: 'C0G', tol: '±5%', height: 0.8, dsHash: '02336ea48ea44ca18c72517dd3cb7b47' }),
   CAP({ id: 'C14663', mpn: 'CC0603KRX7R9BB104', manufacturer: 'YAGEO', value: '100nF', farads: 100e-9, size: '0603', volts: 50, dielectric: 'X7R', tol: '±10%', height: 0.8, dsHash: '23ccee80ee542e7cf156a772bb589942' }),
-  LED0603('C2286', 'KT-0603R', '#ff3b30', 'Red', 2.0, 0.02, 'basic', { 'Illumination Color': 'Red', 'Voltage - Forward(Vf)': '1.8V~2.4V', 'Test Current': '20mA', 'Luminous Intensity': '300mcd', 'Wavelength - Dominant': '615nm~630nm', 'Viewing Angle': '120°', 'Operating Temperature': '-40℃~+85℃' }, '011ec3e8cb1e825f6961d29bc4db4c7a'),
-  LED0603('C12624', 'KT-0603G', '#1fd17a', 'Green', 2.9, 0.005, 'extended', { 'Illumination Color': 'Emerald Green', 'Voltage - Forward(Vf)': '3.1V', 'Test Current': '5mA', 'Luminous Intensity': '430mcd', 'Wavelength - Dominant': '513nm~528nm', 'Viewing Angle': '120°', 'Operating Temperature': '-40℃~+85℃' }, '69e84a3abd84e5ab5856c47a2d0334ce'),
+  chipLed('C2286', 'KT-0603R', '0603', '#ff3b30', 'Red', 2.0, 0.02, 'basic', { 'Illumination Color': 'Red', 'Voltage - Forward(Vf)': '1.8V~2.4V', 'Test Current': '20mA', 'Luminous Intensity': '300mcd', 'Wavelength - Dominant': '615nm~630nm', 'Viewing Angle': '120°', 'Operating Temperature': '-40℃~+85℃' }, '011ec3e8cb1e825f6961d29bc4db4c7a', 0.024),
+  chipLed('C12624', 'KT-0603G', '0603', '#1fd17a', 'Green', 2.9, 0.005, 'extended', { 'Illumination Color': 'Emerald Green', 'Voltage - Forward(Vf)': '3.1V', 'Test Current': '5mA', 'Luminous Intensity': '430mcd', 'Wavelength - Dominant': '513nm~528nm', 'Viewing Angle': '120°', 'Operating Temperature': '-40℃~+85℃' }, '69e84a3abd84e5ab5856c47a2d0334ce', 0.022),
+  chipLed('C2297', 'KT-0805G', '0805', '#1fd17a', 'Green', 2.85, 0.005, 'basic', { 'Illumination Color': 'Emerald Green', 'Voltage - Forward(Vf)': '2.6V~3.1V', 'Test Current': '5mA', 'Luminous Intensity': '430mcd', 'Wavelength - Dominant': '513nm~528nm', 'Viewing Angle': '120°', 'Operating Temperature': '-40℃~+85℃' }, 'de342fde3322df0797012cd7a04e2194', 0.031),
   crystal16m(),
   ao3400a(),
   ss34(),
   d1n4148w(),
   tact6x6(),
+  tact5x5(),
   usbC(),
   jstPh('C131334', 'B4B-PH-K-S(LF)(SN)', 4, 0.238),
   jstPh('C131337', 'B2B-PH-K-S(LF)(SN)', 2, 0.166),

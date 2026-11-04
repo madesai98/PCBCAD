@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { componentCourtyard, pointInPolygon, type Board, type PartDef } from '@pcbcad/core';
+import { placedPads, componentCourtyard, pointInPolygon, type Board, type PartDef } from '@pcbcad/core';
 import { autoPlace } from './place';
 import { convexOverlapDepth, runDrc } from './drc';
 import { bigBoard, comp, emptyBoard, routingTestBoard, stdParts, wire } from './test-fixtures';
@@ -20,6 +20,17 @@ function assertLegal(b: Board, parts: Record<string, PartDef>, spacing: number) 
   for (const { c, poly } of polys) {
     expect(c.placed).toBe(true);
     expect([0, 90, 180, 270]).toContain(c.rotation);
+    const part = parts[c.partId];
+    if (part.category === 'connector' && part.connector?.matingDirection) {
+      // edge connectors may overhang the edge with their body; their copper must keep edge clearance
+      for (const pp of placedPads(c, part.footprint!))
+        for (const p of pp.polygon) {
+          expect(pointInPolygon(p, b.outline)).toBe(true);
+          expect(p[0]).toBeGreaterThanOrEqual(inset - 1e-6);
+          expect(p[1]).toBeGreaterThanOrEqual(inset - 1e-6);
+        }
+      continue;
+    }
     for (const p of poly) {
       expect(pointInPolygon(p, b.outline)).toBe(true);
       expect(p[0]).toBeGreaterThanOrEqual(inset - 1e-6);
@@ -117,6 +128,8 @@ describe('autoPlace', () => {
     expect(report.some((l) => /Y1 → next to U1/.test(l))).toBe(true);
     // mating direction +y rotated to face -x (left edge): rotation 90
     expect(out.components[2].rotation).toBe(90);
+    // and slid to the edge: body overhangs, mating face just past x = 0
+    expect(report.some((l) => /J1 slid .* to the board edge/.test(l))).toBe(true);
   });
 
   it('reports parts that do not fit and leaves them unplaced', () => {

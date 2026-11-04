@@ -15,7 +15,7 @@
  *     courtyards (+spacing) never overlap on the same side, stay inside the outline inset by
  *     edgeClearance, avoid cutouts and mounting-hole keep-outs.
  */
-import { footprintToBoard, pointInPolygon, rotate2, type Board, type ComponentInstance, type FootprintDef, type PartDef, type Side, type Vec2 } from '@pcbcad/core';
+import { componentCourtyard, footprintToBoard, placedPads, pointInPolygon, polygonBBox, rotate2, type Board, type ComponentInstance, type FootprintDef, type PartDef, type Side, type Vec2 } from '@pcbcad/core';
 import { IC_CATEGORIES } from './erc';
 import { bboxOf, distPtSeg2, mulberry32, nowMs, ringArea as ringAreaOf } from './geom';
 import { isGroundNet } from './model';
@@ -79,7 +79,59 @@ export function autoPlace(board: Board, parts: Record<string, PartDef>, opts: Au
   if (!out.outline || out.outline.length < 3) return { board: out, report: ['Board has no outline; nothing placed.'] };
   const placer = new Placer(out, parts, opts, report);
   placer.run();
+  flushEdgeConnectors(out, parts, report);
   return { board: out, report };
+}
+
+/**
+ * Real products put connectors at the board edge so the mating face sits close to the enclosure
+ * wall: slide every connector whose mating direction faces a nearby board edge outward until its
+ * body overhangs the edge by `overhang` (shell/housing only — pads keep rules.edgeClearance), as
+ * long as its courtyard does not run into another component. Mutates `board`.
+ */
+export function flushEdgeConnectors(board: Board, parts: Record<string, PartDef>, report: string[] = [], overhang = 0.5): void {
+  if (!board.outline?.length) return;
+  const bb = polygonBBox(board.outline);
+  const ec = Math.max(0, board.rules.edgeClearance);
+  const boxOf = (c: ComponentInstance) => {
+    const fp = parts[c.partId]?.footprint;
+    return fp ? polygonBBox(componentCourtyard(c, fp)) : null;
+  };
+  for (const c of board.components) {
+    const part = parts[c.partId];
+    const fp = part?.footprint;
+    const md = part?.connector?.matingDirection;
+    if (!fp || !md || md === '+z' || !c.placed || c.locked) continue;
+    const local: Vec2 = md === '+x' ? [1, 0] : md === '-x' ? [-1, 0] : md === '+y' ? [0, 1] : [0, -1];
+    const o = footprintToBoard({ x: 0, y: 0, rotation: c.rotation, side: c.side }, [0, 0]);
+    const t = footprintToBoard({ x: 0, y: 0, rotation: c.rotation, side: c.side }, local);
+    const dir: Vec2 = [t[0] - o[0], t[1] - o[1]];
+    const axisN = Math.abs(dir[0]) > 0.7 ? 0 : Math.abs(dir[1]) > 0.7 ? 1 : -1;
+    if (axisN < 0) continue;
+    const axis = axisN as 0 | 1;
+    const sgn = Math.sign(dir[axis]);
+    const edgeS = sgn > 0 ? (axis === 0 ? bb.maxX : bb.maxY) : -(axis === 0 ? bb.minX : bb.minY);
+    const front = Math.max(...componentCourtyard(c, fp).map((p) => sgn * p[axis]));
+    const padFront = Math.max(-Infinity, ...placedPads(c, fp).flatMap((pp) => pp.polygon.map((p) => sgn * p[axis])));
+    if (edgeS - front > 6) continue; // not an edge connector
+    let shift = edgeS + overhang - front;
+    if (Number.isFinite(padFront)) shift = Math.min(shift, edgeS - ec - padFront);
+    if (shift <= 0.05) continue;
+    const moved: ComponentInstance = { ...c, x: axis === 0 ? c.x + sgn * shift : c.x, y: axis === 1 ? c.y + sgn * shift : c.y };
+    const nb = boxOf(moved);
+    const hit =
+      nb &&
+      board.components.some((other) => {
+        if (other === c || other.side !== c.side || !other.placed) return false;
+        const ob = boxOf(other);
+        return !!ob && ob.minX < nb.maxX && ob.maxX > nb.minX && ob.minY < nb.maxY && ob.maxY > nb.minY;
+      });
+    const nearHole = nb && (board.holes ?? []).some((h) => h.x + h.drill / 2 > nb.minX && h.x - h.drill / 2 < nb.maxX && h.y + h.drill / 2 > nb.minY && h.y - h.drill / 2 < nb.maxY);
+    if (hit || nearHole) continue;
+    c.x = moved.x;
+    c.y = moved.y;
+    report.push(`${c.ref} slid ${shift.toFixed(2)} mm to the board edge (mating face ${(front + shift - edgeS).toFixed(2)} mm past the edge, pads ≥ ${ec} mm inside)`);
+  }
 }
 
 class Placer {

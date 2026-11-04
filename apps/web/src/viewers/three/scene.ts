@@ -83,6 +83,12 @@ interface FNode {
   disposables: { dispose(): void }[];
 }
 
+/** Content signature of a board and the parts it uses (for build caching across project revisions). */
+function boardSignature(b: Board, parts: Record<string, PartDef>): string {
+  const used = [...new Set(b.components.map((c) => c.partId))].sort();
+  return hash(JSON.stringify(b)) + ':' + hash(JSON.stringify(used.map((id) => parts[id] ?? null)));
+}
+
 function hash(s: string): string {
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) {
@@ -145,7 +151,7 @@ export class AssemblyScene {
   private pool = new MaterialPool();
   private nodes: Node[] = [];
   private fnodes: FNode[] = [];
-  private boardCache = new Map<string, { board: Board; parts: Record<string, PartDef>; build: BoardBuild }>();
+  private boardCache = new Map<string, { sig: string; build: BoardBuild }>();
   private meshCache = new Map<string, Promise<MeshData | null>>();
   private project: Project | null = null;
   private getMesh: GetMesh | null = null;
@@ -287,7 +293,9 @@ export class AssemblyScene {
 
   setProject(project: Project, getMesh: GetMesh) {
     if (project === this.project && getMesh === this.getMesh) return;
-    if (getMesh !== this.getMesh) this.meshCache.clear();
+    // Mesh cache keys carry content hashes, so it survives new getMesh identities (hosts often
+    // recreate the loader per project revision); only a different project starts fresh.
+    if (this.project && this.project.id !== project.id) this.meshCache.clear();
     const firstForProject = this.project?.id !== project.id;
     this.project = project;
     this.getMesh = getMesh;
@@ -482,7 +490,10 @@ export class AssemblyScene {
     let p = this.meshCache.get(k);
     if (!p) {
       const gm = this.getMesh;
-      p = gm ? gm(key).catch(() => null) : Promise.resolve(null);
+      p = (gm ? gm(key).catch(() => null) : Promise.resolve(null)).then((md) => {
+        if (!md) this.meshCache.delete(k); // retry on the next rebuild instead of caching a miss
+        return md;
+      });
       this.meshCache.set(k, p);
     }
     return p;
@@ -505,12 +516,13 @@ export class AssemblyScene {
     this.clearCaps();
     const parts = project.parts;
 
-    // Board builds (cached by object identity).
+    // Board builds (cached by content signature: hosts typically hand us fresh objects per revision).
     const usedBoards = new Set<string>();
     const boardBuild = (b: Board): BoardBuild => {
       usedBoards.add(b.id);
+      const sig = boardSignature(b, parts);
       const hit = this.boardCache.get(b.id);
-      if (hit && hit.board === b && hit.parts === parts) return hit.build;
+      if (hit && hit.sig === sig) return hit.build;
       hit?.build.dispose();
       const build = buildBoard(b, parts, {
         pool: this.pool,
@@ -522,7 +534,7 @@ export class AssemblyScene {
           this.afterAsync();
         },
       });
-      this.boardCache.set(b.id, { board: b, parts, build });
+      this.boardCache.set(b.id, { sig, build });
       return build;
     };
 
@@ -1148,7 +1160,7 @@ export class AssemblyScene {
 
   /* ------------------------------------------- picking ------------------------------------------- */
 
-  private pick(clientX: number, clientY: number): { sel: Assembly3DSelection; info: Omit<HoverInfo, 'x' | 'y'>; key: string } | null {
+  private pick(clientX: number, clientY: number): { sel: Assembly3DSelection | null; id: string; info: Omit<HoverInfo, 'x' | 'y'>; key: string } | null {
     const rect = this.renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
     this.raycaster.setFromCamera(ndc, this.camera);
@@ -1179,6 +1191,7 @@ export class AssemblyScene {
         const part = project.parts[c.partId];
         return {
           sel: { kind: 'component', boardId: board.id, componentId: c.id },
+          id: c.id,
           info: { title: c.ref, subtitle: [c.value ?? part?.value, part?.mpn].filter(Boolean).join(' · '), detail: `${board.name} · ${c.side}` },
           key: `c:${c.id}`,
         };
@@ -1188,7 +1201,9 @@ export class AssemblyScene {
         const node = this.nodes.find((n) => n.boardId === pd.boardId);
         const ob = board?.outlineSpec;
         return {
-          sel: { kind: 'board', boardId: pd.boardId, instanceId: node?.instanceId },
+          // A bare board surface is hover-only: clicking it deselects (the app has no board selection).
+          sel: null,
+          id: node?.instanceId ?? pd.boardId,
           info: { title: board?.name ?? 'Board', subtitle: ob ? `${ob.width}×${ob.height} mm · ${board?.stackup.layers}L · ${board?.stackup.thickness} mm` : undefined, detail: node?.unassigned ? 'Not in assembly yet' : undefined },
           key: `b:${pd.boardId}`,
         };
@@ -1197,6 +1212,7 @@ export class AssemblyScene {
         const part = project.mechanical.find((m) => m.id === pd.partId);
         return {
           sel: { kind: 'mech', partId: pd.partId, instanceId: pd.instanceId },
+          id: pd.instanceId,
           info: { title: part?.name ?? 'Part', subtitle: part ? `${part.kind.replace('-', ' ')} · ${part.materialId}` : undefined, detail: part?.process.replace(/-/g, ' ') },
           key: `m:${pd.instanceId}`,
         };
@@ -1206,6 +1222,7 @@ export class AssemblyScene {
         const s = part?.fastener;
         return {
           sel: { kind: 'part', partId: pd.partId, fastenerId: pd.fastenerId },
+          id: pd.fastenerId,
           info: { title: s ? `${s.thread ?? `M${s.diameter}`} ${s.type.replace(/-/g, ' ')}` : 'Fastener', subtitle: s?.length ? `${s.length} mm · ${s.materialId}` : s?.materialId, detail: part?.mpn },
           key: `f:${pd.fastenerId}`,
         };
@@ -1255,8 +1272,7 @@ export class AssemblyScene {
       }
       if (r.key !== this.hoverKey) {
         this.hoverKey = r.key;
-        const id = r.sel.kind === 'component' ? r.sel.componentId : r.sel.kind === 'mech' ? (r.sel.instanceId ?? r.sel.partId) : r.sel.kind === 'part' ? r.sel.fastenerId : r.sel.boardId;
-        this.setHoverBox(id === this.selectedId ? null : this.entityBox(id));
+        this.setHoverBox(r.id === this.selectedId ? null : this.entityBox(r.id));
         this.request();
       }
       this.cb.onHover({ ...r.info, x: this.pointer.x - rect.left, y: this.pointer.y - rect.top });

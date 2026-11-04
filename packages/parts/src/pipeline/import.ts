@@ -335,9 +335,28 @@ export async function importPart(idOrMpn: string, opts: ImportPartOptions = {}):
     }
     for (const w of ee.warnings) if (!/origin corrected/.test(w)) notes.push(`EasyEDA: ${w}`);
   }
+  // curated builtin entry: fills pins / footprint / package spec the library record did not provide
+  const builtin = ALL_CATALOG_PARTS.find((b) => b.id === code);
+  if (!part.footprint && builtin?.footprint?.pads.length) {
+    part.footprint = structuredClone(builtin.footprint);
+    part.provenance.footprint = 'builtin';
+    log.push('Footprint: curated builtin footprint used (no library footprint)');
+  }
+  if (!part.pins.length && builtin?.pins.length) {
+    part.pins = structuredClone(builtin.pins);
+    part.provenance.symbol = 'builtin';
+    log.push('Pins: curated builtin pin table used (no library symbol)');
+  }
   const pinCount = part.footprint ? new Set(part.footprint.pads.map((p) => p.number).filter(Boolean)).size : part.pins.length || undefined;
   const ctx = { pins: pinCount, mpn, description, category };
-  const spec: PackageSpec | undefined = parsePackageName(pkg, ctx) ?? (info.footprintName ? parsePackageName(info.footprintName, ctx) : undefined) ?? (info.package && info.package !== pkg ? parsePackageName(info.package, ctx) : undefined);
+  const builtinSpec = builtin?.packageSpec ? structuredClone(builtin.packageSpec) : undefined;
+  const spec: PackageSpec | undefined =
+    part.provenance.footprint === 'builtin' && builtinSpec
+      ? builtinSpec
+      : (parsePackageName(pkg, ctx) ??
+        (info.footprintName ? parsePackageName(info.footprintName, ctx) : undefined) ??
+        (info.package && info.package !== pkg ? parsePackageName(info.package, ctx) : undefined) ??
+        builtinSpec);
   if (spec) part.packageSpec = spec;
   if (!part.footprint) {
     if (spec) {
@@ -388,6 +407,10 @@ export async function importPart(idOrMpn: string, opts: ImportPartOptions = {}):
     if (model) part.model3d.stepUrl = easyedaStepUrl(model.uuid);
     part.provenance.model3d = 'generated';
   }
+  if (!part.model3d && builtin?.model3d) {
+    part.model3d = structuredClone(builtin.model3d);
+    part.provenance.model3d = 'builtin';
+  }
   if (!part.model3d) needs.push({ facet: 'model3d', hint: `No 3D model; provide packageSpec so a parametric body can be generated (body width/length/height from the datasheet).` });
 
   /* -------------------------------------------------------------------- body envelope */
@@ -421,7 +444,6 @@ export async function importPart(idOrMpn: string, opts: ImportPartOptions = {}):
   }
   const thermal = inferThermal(part);
   if (thermal) part.thermal = thermal;
-  const builtin = ALL_CATALOG_PARTS.find((b) => b.id === code);
   if (builtin) overlayBuiltin(part, builtin, log);
   if (!part.sim && !NO_SIM_NEEDED.includes(category)) needs.push({ facet: 'sim', hint: simHint(part) });
   else if (part.sim?.kind === 'ic' && part.provenance.sim === 'generated' && (category === 'rf-module' || category === 'module') && iccFromParams(params) === undefined) {

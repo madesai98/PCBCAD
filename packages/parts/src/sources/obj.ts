@@ -125,9 +125,10 @@ export function parseEasyEdaObj(text: string, placement?: EasyEdaModelPlacement)
     const m = mtls.get(name);
     const color = m ? hex(m.kd) : '#9a9a9a';
     const opacity = m ? Math.max(0.1, Math.min(1, 1 - m.d)) : 1;
-    const kdAvg = m ? (m.kd[0] + m.kd[1] + m.kd[2]) / 3 : 0.5;
-    const ksAvg = m ? (m.ks[0] + m.ks[1] + m.ks[2]) / 3 : 0;
-    const metal = ksAvg >= 0.35 && ksAvg >= 0.4 * kdAvg;
+    // EasyEDA exports plastics with Ks ≈ 0.3·Kd and metals with Ks ≳ 0.4·Kd; the max channel keeps gold (Ks r,g only) metallic.
+    const kdMax = m ? Math.max(m.kd[0], m.kd[1], m.kd[2]) : 0.5;
+    const ksMax = m ? Math.max(m.ks[0], m.ks[1], m.ks[2]) : 0;
+    const metal = ksMax >= 0.35 && ksMax >= 0.4 * kdMax;
     const key = `${color}|${rnd(opacity, 2)}|${metal}`;
     const g = groups.get(key);
     if (g) g.tris.push(...list);

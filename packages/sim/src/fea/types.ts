@@ -78,6 +78,8 @@ export interface StructuralResultDetail extends StructuralResult {
   raw: { maxVonMises: number; minSafetyFactor: number; maxStressAt: Vec3 };
   /** Number of voxels excluded from the primary metrics as singularity-adjacent. */
   singularityExcludedVoxels: number;
+  /** 99th percentile of the voxel von Mises stress over the analysed, non-excluded voxels (MPa). */
+  vonMisesP99: number;
   /** Total applied load (N) — sum of forces, pressures and body forces actually applied. */
   appliedForce: Vec3;
   /** Number of solid bodies (face-connected voxel clusters) analysed / skipped. */
@@ -90,13 +92,23 @@ export interface StructuralResultDetail extends StructuralResult {
 export type DropOrientation = 'bottom' | 'top' | 'side-x' | 'side-y' | 'corner' | 'edge';
 export type DropFloor = 'concrete' | 'wood' | 'carpet';
 
-/** A lumped mass (component, battery, …) carried by the structure during a drop. */
+/**
+ * A lumped mass (board, component, battery, …) carried by the structure during a drop.
+ *
+ * Its inertial force (m·a toward the floor) is applied to the solid voxels of `support` when given —
+ * e.g. the boss/standoff cylinders a PCB rests on, so the board and component inertia flows through the
+ * bosses. Otherwise it is applied where the mass would press on the structure: the first solid voxel met
+ * from `position` along the drop direction (nearest solid voxel if none), spread over the face-connected
+ * solid voxels within max(3h, 4 mm, ½·footprint of a ≈2 g/cm³ cube of that mass) of that point.
+ */
 export interface DropExtraMass {
-  /** Position (grid frame, mm); its inertial load is applied to the nearest solid voxels. */
+  /** Centre of mass (grid frame, mm). */
   position: Vec3;
   massGrams: number;
   componentId?: string;
   ref?: string;
+  /** Optional load path (regions are resolved once per distinct object, so share one object per board). */
+  support?: Region;
 }
 
 export interface DropSetup extends Omit<StructuralSetup, 'loads' | 'bodyAcceleration' | 'fixtures'> {

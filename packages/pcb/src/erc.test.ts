@@ -85,3 +85,24 @@ describe('runErc', () => {
     expect(issues).toEqual([]);
   });
 });
+
+describe('runErc — same-component outputs', () => {
+  it('does not flag two output pins of one regulator (VOUT + tab) as a conflict', async () => {
+    const { createBoard } = await import('@pcbcad/core');
+    const b = createBoard('t', 20, 20);
+    const part: any = {
+      id: 'ldo', mpn: 'AMS1117-3.3', manufacturer: 'x', description: '', category: 'ldo', package: 'SOT-223', params: {}, offers: [],
+      pins: [
+        { number: '1', name: 'GND', type: 'power_in' },
+        { number: '2', name: 'VOUT', type: 'power_out' },
+        { number: '3', name: 'VIN', type: 'power_in' },
+        { number: '4', name: 'VOUT', type: 'power_out' },
+      ],
+      provenance: { specs: 'builtin', symbol: 'builtin', footprint: 'builtin', model3d: 'builtin', sim: 'builtin', source: 't' },
+    };
+    b.nets.push({ id: 'n33', name: '3V3', class: 'power' }, { id: 'ngnd', name: 'GND', class: 'ground' });
+    b.components.push({ id: 'u1', ref: 'U1', partId: 'ldo', x: 5, y: 5, rotation: 0, side: 'top', placed: true, pinNets: { '1': 'ngnd', '2': 'n33', '4': 'n33' } });
+    const codes = runErc(b, { ldo: part }).map((i) => i.code);
+    expect(codes).not.toContain('output-conflict');
+  });
+});

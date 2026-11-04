@@ -114,7 +114,7 @@ export function Gallery() {
   );
   const section = useMemo(() => (sectionAxis === 'off' ? null : { axis: sectionAxis, offset: sectionOffset }), [sectionAxis, sectionOffset]);
 
-  const onSelect3d = (s: Assembly3DSelection | null) => setSelected(s?.kind === 'component' ? s.componentId : s?.kind === 'mech' ? (s.instanceId ?? s.partId) : s?.kind === 'part' ? s.fastenerId : s?.kind === 'board' ? (s.instanceId ?? s.boardId) : null);
+  const onSelect3d = (s: Assembly3DSelection | null) => setSelected(s?.kind === 'component' ? s.componentId : s?.kind === 'mech' ? (s.instanceId ?? s.partId) : s?.kind === 'part' ? s.fastenerId : null);
 
   const pcbOverlayObj = useMemo(
     () => ({
@@ -198,7 +198,7 @@ export function Gallery() {
               <Chip>{demo.main.nets.length} nets</Chip>
             </>
           }
-          bodyClassName="h-[420px] sm:h-[600px]"
+          bodyClassName="h-[300px] sm:h-[600px]"
         >
           <SchematicView project={demo.project} boardId={demo.main.id} selectedIds={selIds} highlightNetId={null} onSelectComponent={setSelected} onHoverNet={setHoverNet} />
         </Card>

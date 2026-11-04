@@ -305,6 +305,51 @@ export const schematicTools: ToolDef[] = [
     },
   },
   {
+    name: 'set_external_supply',
+    title: 'External power input',
+    group: 'schematic',
+    description:
+      'Declare power that enters the product from outside through a component pin — a USB charger on a USB-C VBUS pin, a bench/wall supply on a barrel jack, a field supply on a terminal block, a battery on a JST connector. Circuit, thermal, airflow and firmware simulations use it as a voltage source with internal resistance. Without one, a board powered only through connectors has no source and simulates at 0 V. Pass an empty list to remove.',
+    inputSchema: S.obj(
+      {
+        boardId: S.str(),
+        ref: S.str('Component (usually a connector), e.g. J1'),
+        supplies: S.arr(
+          S.obj(
+            {
+              pin: S.str('Pin number or name, e.g. "VBUS"'),
+              V: S.num('Open-circuit voltage'),
+              Rint: S.num('Source resistance Ω (default 0.05)'),
+              Imax: S.num('Source current limit A'),
+              groundPin: S.str('Return pin (default board ground)'),
+              name: S.str('e.g. "USB-C charger 5 V"'),
+            },
+            ['pin', 'V'],
+          ),
+        ),
+      },
+      ['boardId', 'ref', 'supplies'],
+    ),
+    handler: (ctx, a: { boardId: string; ref: string; supplies: { pin: string; V: number; Rint?: number; Imax?: number; groundPin?: string; name?: string }[] }) => {
+      const p = ctx.session.project;
+      const b = requireBoard(p, a.boardId);
+      const c = requireComponent(b, a.ref);
+      const part = p.parts[c.partId];
+      for (const s of a.supplies) {
+        const pins = part ? resolvePins(part, s.pin) : [];
+        if (!pins.length) throw new ToolError(`${c.ref} has no pin '${s.pin}'. Pins: ${part ? pinList(part, 64) : '?'}`);
+        if (!pins.some((pn) => c.pinNets[pn])) throw new ToolError(`${c.ref}.${s.pin} is not connected to a net yet — connect it first`);
+      }
+      ctx.session.mutate(ctx, 'set_external_supply', () => {
+        c.supplies = a.supplies.length ? a.supplies : undefined;
+        return a.supplies.length ? `${c.ref}: external supply ${a.supplies.map((s) => `${s.pin} = ${s.V} V`).join(', ')}` : `${c.ref}: external supply removed`;
+      });
+      return a.supplies.length
+        ? `${b.name}:${c.ref} now supplies ${a.supplies.map((s) => `${s.name ? `${s.name}: ` : ''}${s.pin} = ${s.V} V (Rint ${s.Rint ?? 0.05} Ω${s.Imax ? `, ${s.Imax} A max` : ''})`).join('; ')}.`
+        : `Removed external supplies from ${c.ref}.`;
+    },
+  },
+  {
     name: 'remove_components',
     title: 'Remove components',
     group: 'schematic',

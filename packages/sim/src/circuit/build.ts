@@ -569,7 +569,7 @@ export function buildCircuit(project: Project, target: CircuitTarget, opts: Buil
     const hasSource = (b: Board) =>
       b.components.some((c) => {
         const p = project.parts[c.partId];
-        return !c.dnp && p && (p.sim?.kind === 'vsource' || p.category === 'battery');
+        return !c.dnp && p && (p.sim?.kind === 'vsource' || p.category === 'battery' || (c.supplies?.length ?? 0) > 0);
       });
     refBoard = boards.find(hasSource) ?? boards.find((b) => groundNets.get(b.id)!.size) ?? boards[0];
   }
@@ -644,6 +644,32 @@ export function buildCircuit(project: Project, target: CircuitTarget, opts: Buil
         }
       }
       devices.push(...res.devices);
+      // power entering from outside the product through this component (USB charger, bench supply…)
+      let supplied = false;
+      for (const [si, sup] of (c.supplies ?? []).entries()) {
+        const pinNum = resolvePins(part, sup.pin).find((pn) => c.pinNets[pn]);
+        if (!pinNum) {
+          warnings.push(`${label}: external supply pin '${sup.pin}' is not connected to a net — supply ignored`);
+          continue;
+        }
+        const gnds = groundNets.get(b.id)!;
+        let nNode = gnds.size ? (b === refBoard ? '0' : `gnd@${b.id}`) : '0';
+        if (sup.groundPin) {
+          const g = resolvePins(part, sup.groundPin).find((pn) => c.pinNets[pn]);
+          if (g) nNode = netNode(c.pinNets[g]);
+          else warnings.push(`${label}: external supply return pin '${sup.groundPin}' not connected — using board ground`);
+        }
+        devices.push({
+          id: `${c.id}#supply${si}`,
+          kind: 'vsource',
+          role: 'supply',
+          componentId: c.id,
+          nodes: { p: netNode(c.pinNets[pinNum]), n: nNode },
+          pins: { p: pinNum },
+          params: { V: sup.V, Rint: sup.Rint ?? 0.05 },
+        });
+        supplied = true;
+      }
       const pinNodes: Record<string, string> = {};
       for (const [pin, netId] of Object.entries(c.pinNets)) pinNodes[pin] = netNode(netId);
       let powerRating = part.ratings?.power;
@@ -662,7 +688,7 @@ export function buildCircuit(project: Project, target: CircuitTarget, opts: Buil
         pinNets: { ...c.pinNets },
         color: res.color,
         powerRating,
-        model: res.model === 'unknown' ? 'none' : res.model,
+        model: supplied ? 'supply' : res.model === 'unknown' ? 'none' : res.model,
       };
     }
   }

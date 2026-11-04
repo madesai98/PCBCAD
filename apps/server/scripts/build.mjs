@@ -19,7 +19,7 @@ const banner = {
 
 const common = { bundle: true, platform: 'node', format: 'esm', target: 'node20', external, banner, sourcemap: true, logLevel: 'info' };
 
-await build({ ...common, entryPoints: [path.join(root, 'src', 'cli.ts')], outfile: path.join(dist, 'cli.js'), banner: { js: `#!/usr/bin/env node\n${banner.js}` } });
+await build({ ...common, entryPoints: [path.join(root, 'src', 'cli.ts')], outfile: path.join(dist, 'cli.js') });
 await build({ ...common, entryPoints: [path.join(root, 'src', 'sim', 'worker.ts')], outfile: path.join(dist, 'sim-worker.js') });
 
 fs.copyFileSync(path.join(root, 'mcp', 'pcbcad-mcp.mjs'), path.join(dist, 'pcbcad-mcp.mjs'));

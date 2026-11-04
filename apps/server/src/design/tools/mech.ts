@@ -87,7 +87,7 @@ export const mechTools: ToolDef[] = [
         topClearance: S.num('mm above tallest component'),
         bottomClearance: S.num('standoff height under the board mm'),
         cornerRadius: S.num(),
-        ventFaces: S.arr(S.enum(FACES)),
+        ventFaces: S.arr(S.enum(['top', 'bottom', '+x', '-x', '+y', '-y']), 'Vent slot faces. top/bottom (cover/base floors) mold without slides and form a natural-convection chimney; side faces need side actions.'),
         insert: S.enum(['heat-set', 'self-tapping']),
         screwPart: S.str('Fastener part id for PCB/case screws'),
         insertPart: S.str('Heat-set insert part id'),

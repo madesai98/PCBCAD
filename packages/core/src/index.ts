@@ -11,3 +11,5 @@ export * from './packed';
 export * from './ids';
 export * from './netlist';
 export * from './factory';
+export * from './protocol';
+export * from './bom';

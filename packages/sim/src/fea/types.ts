@@ -1,0 +1,102 @@
+import type { EffectiveMaterial, StructuralResult, Vec3, VoxelGrid } from '@pcbcad/core';
+
+/**
+ * Selection of solid voxels (and their nodes) in a voxel grid. All coordinates are grid-frame mm.
+ *
+ * - `box`: solid voxels whose centre lies inside [min, max] (inclusive). If no voxel centre is inside,
+ *   the voxels that intersect the box are taken instead (so thin boxes around a surface still work).
+ * - `plane`: the extreme face of the part on one axis side: solid voxels whose near face lies within
+ *   `depth` (default h) of the extreme solid extent on that side. Its *nodes* are only the nodes of
+ *   those voxels' exposed faces that face the plane side (a clamped / loaded surface, not a clamped
+ *   block); pressure acts on those same faces.
+ * - `cylinder`: solid voxels whose centre lies inside the cylinder centred at `center` (mm), with axis
+ *   direction `axis` (normalised internally), `radius` (mm) and total `length` (mm, ±length/2 about the
+ *   centre). If none, voxels whose centre is within half a voxel diagonal of the cylinder are taken.
+ * - `cells`: explicit linear voxel indices (i + nx·(j + ny·k)); empty/out-of-range entries are ignored.
+ *
+ * Except for `plane`, a region's node set is all 8 nodes of every selected voxel, and pressure acts on
+ * all exposed faces of the selected voxels.
+ */
+export type Region =
+  | { kind: 'box'; min: Vec3; max: Vec3 }
+  | { kind: 'plane'; axis: 'x' | 'y' | 'z'; side: 'min' | 'max'; depth?: number }
+  | { kind: 'cylinder'; center: Vec3; axis: Vec3; radius: number; length: number }
+  | { kind: 'cells'; indices: ArrayLike<number> };
+
+/** A load applied to a region. Both parts may be given; they add. */
+export interface StructuralLoad {
+  region: Region;
+  /** Total force (N, grid frame), distributed equally over the region's nodes. */
+  force?: Vec3;
+  /** Pressure (MPa = N/mm²) on the exposed faces of the region, acting inward (into the material). */
+  pressure?: number;
+}
+
+export interface StructuralSetup {
+  /** Voxel model; voxel material index idx ≥ 1 uses materials[idx - 1]. */
+  grid: VoxelGrid;
+  /** Effective (as-manufactured) materials, materials[idx - 1] for voxel material index idx. */
+  materials: EffectiveMaterial[];
+  /** Regions whose nodes are fully clamped (all three displacement components = 0). */
+  fixtures: Region[];
+  loads: StructuralLoad[];
+  /**
+   * Body-force acceleration field (m/s², grid frame), e.g. gravity [0, 0, -9.81]: every voxel receives
+   * the force (density × volume) × a in the direction of `a`. For the d'Alembert load of a body that
+   * accelerates with A, pass −A.
+   */
+  bodyAcceleration?: Vec3;
+  /** PCG iteration limit per solid body (default 1000). */
+  maxIterations?: number;
+  /** Relative residual ‖r‖₂/‖f‖₂ to reach (default 1e-6). */
+  tolerance?: number;
+  /** Progress callback, fraction in [0, 1]. */
+  onProgress?: (fraction: number) => void;
+}
+
+/** Human-readable descriptions copied into the result. */
+export interface StructuralMeta {
+  title: string;
+  loads: string[];
+  fixtures: string[];
+}
+
+/**
+ * StructuralResult plus diagnostic fields that are not (yet) part of the core contract.
+ * The primary metrics (maxVonMises, minSafetyFactor, maxStressAt) exclude the one-voxel layer around
+ * fixtures and concentrated loads; `raw` holds the unfiltered values.
+ */
+export interface StructuralResultDetail extends StructuralResult {
+  /** Unfiltered extreme values (include stress singularities at supports / point loads). */
+  raw: { maxVonMises: number; minSafetyFactor: number; maxStressAt: Vec3 };
+  /** Number of voxels excluded from the primary metrics as singularity-adjacent. */
+  singularityExcludedVoxels: number;
+  /** Total applied load (N) — sum of forces, pressures and body forces actually applied. */
+  appliedForce: Vec3;
+  /** Number of solid bodies (face-connected voxel clusters) analysed / skipped. */
+  bodies: { analysed: number; skipped: number };
+  warnings: string[];
+  /** Wall-clock solve time (ms). */
+  wallMs: number;
+}
+
+export type DropOrientation = 'bottom' | 'top' | 'side-x' | 'side-y' | 'corner' | 'edge';
+export type DropFloor = 'concrete' | 'wood' | 'carpet';
+
+/** A lumped mass (component, battery, …) carried by the structure during a drop. */
+export interface DropExtraMass {
+  /** Position (grid frame, mm); its inertial load is applied to the nearest solid voxels. */
+  position: Vec3;
+  massGrams: number;
+  componentId?: string;
+  ref?: string;
+}
+
+export interface DropSetup extends Omit<StructuralSetup, 'loads' | 'bodyAcceleration' | 'fixtures'> {
+  /** Drop height (m). */
+  heightM: number;
+  orientation: DropOrientation;
+  /** Floor type (default 'concrete'). */
+  floor?: DropFloor;
+  extraMasses?: DropExtraMass[];
+}

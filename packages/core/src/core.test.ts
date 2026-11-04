@@ -90,3 +90,22 @@ describe('factory/netlist', () => {
     expect(resolvePins(part, '2')).toEqual(['2']);
   });
 });
+
+describe('pin resolution on distributor symbols', () => {
+  it('matches packed alternate-function names', () => {
+    const part: any = {
+      pins: [
+        { number: '1', name: '(PCINT19/OC2B/INT1)PD3', type: 'bidirectional' },
+        { number: '27', name: 'PC4(ADC4/SDA/PCINT12)', type: 'bidirectional' },
+        { number: '29', name: 'PC6(RESET#/PCINT14)', type: 'input' },
+        { number: '3', name: 'GND', type: 'power_in' },
+        { number: '5', name: 'GND', type: 'power_in' },
+      ],
+    };
+    expect(resolvePins(part, 'PD3')).toEqual(['1']);
+    expect(resolvePins(part, 'SDA')).toEqual(['27']);
+    expect(resolvePins(part, 'RESET')).toEqual(['29']);
+    expect(resolvePins(part, 'GND')).toEqual(['3', '5']);
+    expect(resolvePins(part, 'PB5')).toEqual([]);
+  });
+});

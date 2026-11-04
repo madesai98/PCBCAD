@@ -92,6 +92,25 @@ export function resolvePins(part: PartDef, pinRef: string): string[] {
   if (byName.length) return byName.map((p) => p.number);
   const byFunction = part.pins.filter((p) => (p.functions ?? []).some((f) => normPinName(f) === n));
   if (byFunction.length === 1) return [byFunction[0].number];
+  // Distributor symbols often pack alternate functions into the name, e.g.
+  // "(PCINT19/OC2B/INT1)PD3" or "PC4(ADC4/SDA/PCINT12)": match on name tokens.
+  const tokens = (name: string) =>
+    name
+      .toUpperCase()
+      .split(/[()/,\s|]+/)
+      .map((t) => t.replace(/^[~!]+/, '').replace(/[#*]+$/, ''))
+      .filter(Boolean);
+  const byToken = part.pins.filter((p) => tokens(p.name).includes(n));
+  if (byToken.length) {
+    // prefer the pin whose primary (port) token matches, e.g. 'PD3' over alternates
+    const primary = byToken.filter((p) => {
+      const t = tokens(p.name);
+      return t[0] === n || t[t.length - 1] === n;
+    });
+    if (primary.length === 1) return [primary[0].number];
+    if (byToken.length === 1) return [byToken[0].number];
+    return byToken.map((p) => p.number);
+  }
   // footprint pads without pin definitions (e.g. mounting tabs)
   if (part.footprint?.pads.some((p) => p.number === ref)) return [ref];
   return [];

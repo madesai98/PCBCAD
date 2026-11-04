@@ -8,17 +8,24 @@ engineering tool, not a certified CFD code — see the accuracy limits below.
 ## API
 
 ```ts
-solveAirflow(setup: AirflowSetup): AirflowResultDetail   // AirflowResult + residuals, air, warnings, …
-airProperties(T°C)                                        // dry-air ρ, μ, k, c_p, β used by the solver
+solveAirflow(setup: AirflowSetup): AirflowResultDetail   // AirflowResult + fans, residuals, air, warnings, …
 ```
 
 * `heatSources[].cells` (normally solid cells of the component) share `power` (W) equally.
 * `openings[].cells` are air cells connected to ambient (on the domain boundary or in wall cut-outs).
-* `fans[]`: air cells of the fan; flow (m³/s) is imposed along the dominant axis of `direction` on the
-  downstream face of every fan cell (face velocity = flow / projected fan area).
+* `fans[]`: air cells of the fan; without `maxPressurePa` the flow (m³/s) is imposed along the dominant
+  axis of `direction` on the downstream face of every fan cell (face velocity = flow / projected area).
 * `externalH` (default 10 W/m²K, convection + radiation) applies to solid cells on the outer domain
-  boundary. **Air cells on the domain boundary that are not openings are adiabatic no-slip walls**, so
-  either make the enclosure walls the domain boundary or mark the outer air as openings.
+  boundary **and to solid faces touching cells of an opening with `kind: 'ambient'`** (the outside-air
+  padding layer produced by `@pcbcad/mech` `voxelizeAssemblyForAirflow`, whose `openings[0]` is that
+  layer). Air cells on the domain boundary that are not openings are adiabatic no-slip walls.
+* `openings[].porosity` (true open area / resolved area, e.g. sub-voxel vent slots carved one voxel wide)
+  adds a Borda–Carnot loss Δp = ½ρK u², K = (1/(0.62 φ) − 1)², on the faces through which air enters or
+  leaves that opening (Newton-linearised in the momentum equation). Other fields of the mech opening
+  objects (`normal`, `openAreaMm2`, …) are accepted and ignored.
+* `fans[].maxPressurePa` (> 0) switches the fan from a fixed flow to a linear fan curve
+  Δp = p_max (1 − Q/flowM3s), applied as a pressure-jump source on the fan faces, so the operating point
+  follows the system resistance. `result.fans` reports each fan's flow and static pressure rise.
 * Result: `temperature` (°C per cell), `velocity` (cell-centred m/s xyz), `streamlines` (≤ 40 polylines,
   mm), `components` (max temperature over each source's cells), `vents` (net flow per opening plus
   `inM3s`/`outM3s`/`heatW`), `heatBalance` {input, vents (advected out relative to ambient), walls (through
@@ -66,6 +73,9 @@ airProperties(T°C)                                        // dry-air ρ, μ, k,
 | heated vertical duct 40×40×200 mm, open both ends | inflow bottom / outflow top, in = out exactly, 120.8 cm³/s at 1 W; 67 iterations |
 | fan duct, 1e-4 m³/s | inlet = outlet = fan flow (to 1e-12); 41 iterations |
 | 60×40×25 vented enclosure (60 k cells, 3 W, natural convection) | 324 iterations, ≈ 19 s; 60 cm³/s chimney flow in low / out high |
+| sealed box inside a 1-cell `kind: 'ambient'` air layer vs walls on the boundary | source temperature within 2 % |
+| chimney vents with porosity 0.1 | flow throttled (121 → 15 cm³/s), in = out |
+| fan with a 2 Pa / 2e-4 m³/s linear curve, free vs throttled duct | operating point on the curve within 0.25 Pa |
 
 Grid-convergence of the coarse solution is **not** implied by these tests; they check conservation,
 boundary-condition logic and robustness.
@@ -84,4 +94,5 @@ boundary-condition logic and robustness.
   spreading: give boards an effective in-plane k, e.g. 10–40 W/mK), temperature-dependent air properties
   (evaluated at ambient), fan curves (fixed flow, no pressure/flow operating point), vent pressure losses
   beyond the resolved geometry, contact resistances.
-* Openings are ambient reservoirs at p = 0; inflow enters at ambient temperature without entrance loss.
+* Openings are ambient reservoirs at p = 0; inflow enters at ambient temperature without entrance loss
+  unless a `porosity` is given.

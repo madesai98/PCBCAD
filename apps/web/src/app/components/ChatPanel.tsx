@@ -50,10 +50,19 @@ export function ChatPanel() {
   const grouped = useMemo(() => groupItems(items), [items]);
   const running = thread?.status === 'running';
 
+  const mobilePane = useApp((s) => s.mobilePane);
   useEffect(() => {
     const el = scroller.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [items]);
+  // the pane is display:none on phones while the design is shown — jump to the latest message
+  // when it becomes visible, and when another conversation is opened
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    stick.current = true;
+    requestAnimationFrame(() => (el.scrollTop = el.scrollHeight));
+  }, [mobilePane, thread?.id]);
 
   const provider = providers.find((p) => p.id === thread?.provider);
 

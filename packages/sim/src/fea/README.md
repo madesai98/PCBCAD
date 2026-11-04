@@ -14,8 +14,12 @@ buildStructuralResult(analysis, meta, scale?): StructuralResultDetail
 ```
 
 `StructuralResultDetail` / `DropResultDetail` are the core `StructuralResult` / `DropResult` plus
-diagnostics (`raw`, `singularityExcludedVoxels`, `appliedForce`, `bodies`, `warnings`, `wallMs`,
-`stiffness`, …). Units: mm, N, MPa (stress, E), kg/m³, g (masses), m/s² (accelerations).
+diagnostics (`raw`, `singularityExcludedVoxels`, `vonMisesP99`, `appliedForce`, `bodies`, `warnings`,
+`wallMs`; drop: `stiffness`, `effectiveMassGrams`, `angularAcceleration`, `dynamics`,
+`massAttachments`). Units: mm, N, MPa (stress, E), kg/m³, g (masses), m/s² (accelerations).
+Optional setup fields beyond the brief: `stressSampling` ('surface' | 'centroid'),
+`bodyAccelerationField` (per-voxel acceleration), drop `extraMasses[].support` and `dynamicCorrection`.
+A warning is added when the maximum deflection exceeds 2 % of the part size.
 
 ### Regions (`Region`)
 
@@ -60,26 +64,43 @@ A region that selects no solid voxel throws; so does a model without fixtures.
 
 ## Drop / impact (`solveDrop`)
 
-Equivalent-static energy method (linear single-DOF spring–mass):
+Equivalent-static energy method with rigid-body (inertia-relief) loading and a shock-response
+correction:
 
-1. `v = √(2 g H)`; mass m = solid voxels + `extraMasses` (each applied as a force on the solid voxels
-   nearest to its position, within one voxel of the nearest).
-2. Impact patch clamped: the extreme voxel layer for `bottom` (−z), `top` (+z), `side-x` (−x),
-   `side-y` (−y); for `corner` (−1,−1,−1)/√3 and `edge` (0,−1,−1)/√2 the voxels within
-   max(1.5 h, 2 mm) of the extreme point/edge along the drop direction.
-3. Unit solve with 1 g toward the floor; `k_s = m·g / (mass-weighted mean displacement along the drop
-   direction)` (Rayleigh-quotient stiffness of the load path).
+1. `v = √(2 g H)`. Mass, centre of mass and inertia tensor from the solid voxels and `extraMasses`.
+2. **Impact patch** (clamped; its centroid is the contact point P): the extreme voxel layer for
+   `bottom` (−z), `top` (+z), `side-x` (−x), `side-y` (−y); for `corner` (−1,−1,−1)/√3 and `edge`
+   (0,−1,−1)/√2 the voxels within max(1.5 h, 2 mm) of the extreme point/edge along the drop direction.
+3. **Unit solve**: a 1 N contact force at P along n = −d accelerates the free body by
+   `a(x) = n/m + α × (x − x_cm)`, `α = I⁻¹ (r_P × n)`; every voxel / extra mass gets its d'Alembert
+   load −m·a(x). The loads are self-equilibrated with the contact force, so the clamped patch reacts
+   no spurious moment (no artificial cantilevering of corner drops). `k_s = 1 / (work of the unit loads)`
+   — identical to the spec's `m·g / (mass-weighted mean displacement)` for a centred face drop.
 4. Floor contact stiffness in series (assumed): concrete 5·10⁷, wood 1·10⁷, carpet 1·10⁶ N/m.
-   `k_eff = 1/(1/k_s + 1/k_f)`, `F = v√(k_eff m)`, `a = F/m`, `peakG = a/9.81`,
-   `contactDurationMs = π√(m/k_eff)·1000`, `stopDistanceMm = F/k_eff·1000`.
-5. Stresses = unit solution × peakG (linear).
-6. Component risk (solder joint / connector retention screening heuristic): inertial force `m·a`;
-   **high** if F > 40 N or (m > 2 g and peak > 1500 g), **medium** if F > 10 N or peak > 500 g.
+   Effective mass at the contact `m_eff = 1/(1/m + (r_P×n)·I⁻¹(r_P×n))` (= m for centred face drops,
+   smaller for corners/edges); `F = v√(k_eff m_eff)`, `peakG = F/(m g)` (centre of mass),
+   `contactDurationMs = π√(m_eff/k_eff)·1000`, `stopDistanceMm = F/k_eff·1000`.
+5. **Shock-response correction** (default; `dynamicCorrection: false` disables it): a flat drop on a
+   hard floor is a very short pulse (≈ 0.1–0.3 ms). Each voxel's (and extra mass's) equivalent-static
+   load is multiplied by the undamped half-sine shock-response factor at its local natural frequency
+   `ω = √(|a| / δ)` (local acceleration over local static deflection in the unit solve): ≈ 4·r for
+   regions whose period is long compared with the pulse (lids, overhangs: r = pulse/period), up to 1.77
+   near resonance, 1 for stiff regions. Stresses come from a second static solve with these loads × F.
+6. **Extra masses** (boards, components, batteries): inertial force on `support` when given (a Region or
+   an array of Regions, e.g. the boss cylinders a board rests on — share one object per board); otherwise on the solid they sit
+   on (nearest solid within h + 0.5 mm) or, for masses floating in a cavity (components of a board that
+   is not in the grid), where they press along the drop direction (ray-cast from the mass). The force is
+   spread over the face-connected solid within max(3h, 4 mm, ½·footprint of a 2 g/cm³ cube) — never a
+   single voxel, so lumped masses do not create point-load singularities. `massAttachments` reports
+   the method used per mass.
+7. Component risk (solder joint / connector retention screening heuristic): inertial force
+   `m·a_local` with the local rigid-body acceleration at the component; **high** if F > 40 N or
+   (m > 2 g and a_local > 1500 g), **medium** if F > 10 N or a_local > 500 g.
 
-Not modelled: rebound, rotation after a corner/edge hit, multiple impacts, plastic deformation, local
-crushing of the contact zone, rate effects, separate contact of internal parts. A heavy part on a
-compliant mount lowers the single-DOF stiffness (and peak force) — real transient peaks on the stiff
-shell can be higher. Treat results as ±2× estimates for compact products.
+Not modelled: rebound, friction, multiple impacts, plastic deformation, local crushing of the contact
+zone, rate effects, contact between internal parts, board flexibility (lumped masses). Perfectly flat
+drops on concrete give very high peaks (thousands of g); real products rarely land perfectly flat.
+Treat results as ±2× estimates.
 
 ## Validation (unit tests, `*.test.ts`)
 
@@ -93,6 +114,9 @@ shell can be higher. Treat results as ±2× estimates for compact products.
 | pressure on a column | σ = p within 2 %, net force = p·A exactly |
 | 42 k-voxel thin-walled ABS enclosure (189 k DOFs) | ≈ 8.5 s, 78 PCG its to 1e-6 (Node 22, 1 core) |
 | 80 k-voxel solid cantilever (h = 0.5 mm, 265 k DOFs) | ≈ 3.9 s, 17 PCG its |
+| drop: F ∝ √H, F = v√(k_eff m_eff), stresses linear in F | exact |
+| drop: 56×64×24 mm PC/ABS shell + 17 g floating masses, 1 m flat on concrete | 8 900 g, σmax 26 MPa (raw = smoothed), SF 2.0, δ 1.9 mm |
+| drop: centred face drop / corner | no rotation, m_eff = m / m_eff < 0.9 m, bounded deflection |
 
 ## Accuracy limits & known issues
 

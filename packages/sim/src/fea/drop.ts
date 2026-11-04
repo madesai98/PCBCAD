@@ -250,7 +250,7 @@ export function solveDrop(setup: DropSetup): DropResultDetail {
     for (const v of out) seen[v] = 0;
     return out.sort((x, y) => x - y);
   };
-  const supportCache = new Map<Region, number[]>();
+  const supportCache = new Map<Region | Region[], number[]>();
   const extraCells: number[][] = [];
   const attachments: DropResultDetail['massAttachments'] = [];
   extra.forEach((em, ei) => {
@@ -262,7 +262,9 @@ export function solveDrop(setup: DropSetup): DropResultDetail {
     if (em.support) {
       let sc = supportCache.get(em.support);
       if (!sc) {
-        sc = Array.from(resolveRegion(rg, em.support).voxels);
+        const set = new Set<number>();
+        for (const reg of Array.isArray(em.support) ? em.support : [em.support]) for (const vx of resolveRegion(rg, reg).voxels) set.add(vx);
+        sc = [...set].sort((x, y) => x - y);
         supportCache.set(em.support, sc);
         if (!sc.length) preWarnings.push(`Support region of ${label} selects no solid voxels; its load follows the drop path instead.`);
       }

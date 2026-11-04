@@ -282,25 +282,60 @@ function structuralSummary(r: { maxVonMises: number; minSafetyFactor: number; ma
 
 /* -------------------------------------------- masses -------------------------------------------- */
 
+/**
+ * Boss cylinders (assembly frame) that carry a board: bosses of the enclosure shells whose axis
+ * passes through the board's footprint. The drop solver applies the board's (and its parts')
+ * inertia through these, which is the real load path.
+ */
+function boardSupports(project: Project, board: Board, boardMatrix: number[]): sim.Region[] {
+  const xs = board.outline.map((p) => p[0]);
+  const ys = board.outline.map((p) => p[1]);
+  const corners = [
+    [Math.min(...xs), Math.min(...ys)],
+    [Math.max(...xs), Math.max(...ys)],
+  ].map(([x, y]) => transformPoint(boardMatrix, [x, y, 0]));
+  const lo = [Math.min(corners[0][0], corners[1][0]) - 0.5, Math.min(corners[0][1], corners[1][1]) - 0.5];
+  const hi = [Math.max(corners[0][0], corners[1][0]) + 0.5, Math.max(corners[0][1], corners[1][1]) + 0.5];
+  const out: sim.Region[] = [];
+  for (const inst of project.assembly.instances) {
+    if (inst.target.kind !== 'mech') continue;
+    const partId = inst.target.partId;
+    const part = project.mechanical.find((m) => m.id === partId);
+    if (part?.kind !== 'enclosure-shell') continue;
+    const m = mat4FromTransform(inst.transform);
+    const o = transformPoint(m, [0, 0, 0]);
+    const zAxis = transformPoint(m, [0, 0, 1]);
+    const axis: Vec3 = [zAxis[0] - o[0], zAxis[1] - o[1], zAxis[2] - o[2]];
+    for (const b of part.bosses) {
+      const c = transformPoint(m, [b.x, b.y, part.wall]);
+      if (c[0] < lo[0] || c[0] > hi[0] || c[1] < lo[1] || c[1] > hi[1]) continue;
+      out.push({ kind: 'cylinder', center: c, axis, radius: b.outerDiameter / 2, length: b.height });
+    }
+  }
+  return out;
+}
+
 /** Component and board masses placed in the assembly frame (for drop tests). */
-function boardMasses(project: Project): { position: Vec3; massGrams: number; componentId?: string; ref?: string }[] {
-  const out: { position: Vec3; massGrams: number; componentId?: string; ref?: string }[] = [];
+function boardMasses(project: Project): sim.DropExtraMass[] {
+  const out: sim.DropExtraMass[] = [];
   for (const b of project.boards) {
     const inst = project.assembly.instances.find((i) => i.target.kind === 'board' && i.target.boardId === b.id);
     if (!inst) continue;
     const m = mat4FromTransform(inst.transform);
+    const supports = boardSupports(project, b, m);
+    const support = supports.length ? supports : undefined; // one shared array per board
     const t = b.stackup.thickness;
     const xs = b.outline.map((p) => p[0]);
     const ys = b.outline.map((p) => p[1]);
     const area = (Math.max(...xs) - Math.min(...xs)) * (Math.max(...ys) - Math.min(...ys));
-    out.push({ position: transformPoint(m, [(Math.max(...xs) + Math.min(...xs)) / 2, (Math.max(...ys) + Math.min(...ys)) / 2, t / 2]), massGrams: area * t * 1.85e-3, ref: `${b.name} PCB` });
+    out.push({ position: transformPoint(m, [(Math.max(...xs) + Math.min(...xs)) / 2, (Math.max(...ys) + Math.min(...ys)) / 2, t / 2]), massGrams: area * t * 1.85e-3, ref: `${b.name} PCB`, support });
     for (const c of b.components) {
       if (c.dnp || !c.placed) continue;
       const part = project.parts[c.partId];
       const body = part?.body ?? { w: 2, l: 2, h: 1 };
       const mass = part?.massGrams ?? Math.max(0.005, body.w * body.l * body.h * 1.6e-3);
       const z = c.side === 'top' ? t + body.h / 2 : -body.h / 2;
-      out.push({ position: transformPoint(m, [c.x, c.y, z]), massGrams: mass, componentId: c.id, ref: c.ref });
+      out.push({ position: transformPoint(m, [c.x, c.y, z]), massGrams: mass, componentId: c.id, ref: c.ref, support });
     }
   }
   return out;

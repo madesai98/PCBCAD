@@ -179,7 +179,8 @@ describe('solveDrop — load paths, rigid-body loading and shock response', () =
 
   it('support regions carry the board and component inertia through the bosses', () => {
     const { grid, masses, bossCells } = shell();
-    const support = { kind: 'cells' as const, indices: bossCells };
+    // union of the four boss cylinders (one shared array for the whole board)
+    const support = [[8, 8], [48, 8], [8, 56], [48, 56]].map(([bx, by]) => ({ kind: 'cylinder' as const, center: [bx, by, 5] as [number, number, number], axis: [0, 0, 1] as [number, number, number], radius: 3.2, length: 6 }));
     const r = solveDrop({ grid, materials: [pcabs], heightM: 1, orientation: 'side-x', extraMasses: masses.map((m) => ({ ...m, support })) });
     expect(r.massAttachments.every((a) => a.method === 'support' && a.voxels === bossCells.length)).toBe(true);
     // the highest stress sits in or at the root of a boss (z < 10 mm, within 6 mm of a boss axis)

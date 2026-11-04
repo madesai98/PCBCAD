@@ -62,6 +62,14 @@ export function componentBodyBox(part: PartDef | undefined): BodyBox {
     if (Number.isFinite(min[0]) && max[2] > min[2]) return { min: [min[0], min[1], Math.max(0, min[2])], max, source: 'model' };
   }
   if (part?.body && part.body.w > 0 && part.body.l > 0 && part.body.h > 0) {
+    // Connector footprints are rarely centred on the housing (USB-C shells sit forward of their
+    // pads, right-angle headers overhang the board edge), so a body box centred on the origin
+    // misplaces the mating face. The courtyard (IPC margin ≈ 0.25 mm) tracks the housing.
+    const cyc = part.footprint?.courtyard;
+    if (part.category === 'connector' && cyc && cyc.maxX - cyc.minX > 0.6 && cyc.maxY - cyc.minY > 0.6) {
+      const m = 0.25;
+      return { min: [cyc.minX + m, cyc.minY + m, 0], max: [cyc.maxX - m, cyc.maxY - m, part.body.h], source: 'body' };
+    }
     return { min: [-part.body.w / 2, -part.body.l / 2, 0], max: [part.body.w / 2, part.body.l / 2, part.body.h], source: 'body' };
   }
   const cy = part?.footprint?.courtyard;

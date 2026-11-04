@@ -132,7 +132,7 @@ function screwPart(r: ScrewRow): PartDef {
   });
 }
 
-const LENGTHS = [4, 5, 6, 8, 10, 12];
+const LENGTHS = [4, 5, 6, 8, 10, 12, 14, 16, 20];
 const THREADS = ['M2', 'M2.5', 'M3'] as const;
 
 const ISO7380: Record<string, [number, number]> = { M2: [3.5, 1.3], 'M2.5': [4.7, 1.5], M3: [5.7, 1.65] };

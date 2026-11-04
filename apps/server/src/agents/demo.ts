@@ -347,7 +347,7 @@ async function buildDemoProduct(ctx: DemoContext) {
     await ctx.say(`${firstLine(r)}.${uart.length ? ` Serial console:\n\n\`\`\`\n${uart.join('\n')}\n\`\`\`` : ''}`);
   });
 
-  let encl = { w: 0, d: 0, h: 0, baseId: '' };
+  let encl = { w: 0, d: 0, h: 0, baseId: '', coverId: '' };
   await ctx.step('Designing the enclosure: a two-part PC/ABS injection-molded housing around the main board — heat-set-insert bosses under the mounting holes, M3 case screws, a USB-C cut-out, a cable exit for the probe, and vent slots in the top and bottom (a natural-convection chimney that molds without side actions).', async () => {
     const r = await ctx.call('create_enclosure', {
       boardIds: ['Main'],
@@ -362,8 +362,8 @@ async function buildDemoProduct(ctx: DemoContext) {
       insertPart: 'fastener:insert-m3x5.7-od4.6',
     });
     const m = /Enclosure base \[(mech_[a-z0-9]+)\] base: ([\d.]+)×([\d.]+)×([\d.]+) mm/.exec(r);
-    const c = /cover: [\d.]+×[\d.]+×([\d.]+) mm/.exec(r);
-    if (m) encl = { baseId: m[1], w: +m[2], d: +m[3], h: +m[4] + (c ? +c[1] : 0) };
+    const c = /Enclosure cover \[(mech_[a-z0-9]+)\] cover: [\d.]+×[\d.]+×([\d.]+) mm/.exec(r);
+    if (m) encl = { baseId: m[1], coverId: c?.[1] ?? '', w: +m[2], d: +m[3], h: +m[4] + (c ? +c[2] : 0) };
     await ctx.say(r.split('\n').slice(1, 3).join(' '));
   });
 
@@ -414,9 +414,21 @@ async function buildDemoProduct(ctx: DemoContext) {
     await ctx.say(firstLine(r));
   });
 
-  await ctx.step('Drop test: 1.2 m onto concrete, landing flat on the base.', async () => {
-    const r = await ctx.call('simulate_drop', { heightM: 1.2, orientation: 'bottom', floor: 'concrete' });
-    await ctx.say(firstLine(r));
+  await ctx.step('Drop test of the device itself (the bracket stays on the wall): 1.2 m onto concrete, landing flat on the base — the boards load the enclosure through their bosses.', async () => {
+    const partIds = [encl.baseId, encl.coverId].filter(Boolean);
+    const r = await ctx.call('simulate_drop', { heightM: 1.2, orientation: 'bottom', floor: 'concrete', ...(partIds.length === 2 ? { partIds } : {}) });
+    const sf = Number(/safety factor ([\d.]+)/.exec(r)?.[1] ?? NaN);
+    await ctx.say(
+      Number.isFinite(sf) && sf < 1.5
+        ? `${firstLine(r)}. That is marginal for a flat drop onto concrete (a conservative screening estimate) — I'm flagging it for review: gussets on the PCB bosses or a 2.5 mm floor would add margin.`
+        : `${firstLine(r)}.`,
+    );
+    if (Number.isFinite(sf) && sf < 1.5)
+      await ctx.call('add_design_note', {
+        title: 'Drop test margin',
+        text: `1.2 m flat drop on concrete: ${firstLine(r)}. Screening estimate is conservative, but consider gussets on the PCB bosses or a thicker floor before tooling.`,
+        tags: ['mechanical', 'review'],
+      });
   });
 
   await ctx.step('Airflow and enclosure heating (natural convection through the vent slots).', async () => {

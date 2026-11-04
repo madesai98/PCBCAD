@@ -113,8 +113,11 @@ export interface DropExtraMass {
   massGrams: number;
   componentId?: string;
   ref?: string;
-  /** Optional load path (regions are resolved once per distinct object, so share one object per board). */
-  support?: Region;
+  /**
+   * Optional load path, e.g. the boss cylinders a board rests on (several regions are united). Regions are
+   * resolved once per distinct object, so share one object/array per board.
+   */
+  support?: Region | Region[];
 }
 
 export interface DropSetup extends Omit<StructuralSetup, 'loads' | 'bodyAcceleration' | 'bodyAccelerationField' | 'fixtures'> {

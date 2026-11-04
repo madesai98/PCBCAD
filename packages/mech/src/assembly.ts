@@ -402,29 +402,43 @@ export function checkAssembly(project: Project, opts: AssemblyCheckOptions = {})
         add('connector-blocked', 'error', `Edge connector ${label} has no cutout in the wall it faces`, { target: tgt, at: p, suggestion: `Add a ${fmt(spec.opening.width + 0.5, 1)} × ${fmt(spec.opening.height + 0.5, 1)} mm cutout centred on the connector (linked to it).` }, comp.componentId);
         continue;
       }
-      // merge touching cutouts on the same face plane (e.g. base + cover halves)
+      // Merge the halves of one opening (e.g. base + cover notches at the parting plane): same face
+      // plane, overlapping horizontally by ≥ 50 %, touching vertically, and not linked to another
+      // component than the seeds are linked to.
       const group = new Set(seeds);
+      const linkSet = new Set(seeds.map((c) => c.linked?.componentId).filter((x): x is string => !!x));
       let u = seeds.map(rect).reduce((a, r) => ({ s0: Math.min(a.s0, r.s0), s1: Math.max(a.s1, r.s1), t0: Math.min(a.t0, r.t0), t1: Math.max(a.t1, r.t1) }));
       let grown = true;
       while (grown) {
         grown = false;
         for (const c of onFace) {
           if (group.has(c) || Math.abs(c.plane - seeds[0].plane) > 3) continue;
+          if (c.linked && !linkSet.has(c.linked.componentId)) continue;
           const r = rect(c);
-          if (r.s0 > u.s1 + 0.3 || r.s1 < u.s0 - 0.3 || r.t0 > u.t1 + 0.3 || r.t1 < u.t0 - 0.3) continue;
+          const overlapS = Math.min(r.s1, u.s1) - Math.max(r.s0, u.s0);
+          if (overlapS < 0.5 * Math.min(r.s1 - r.s0, u.s1 - u.s0) || r.t0 > u.t1 + 0.3 || r.t1 < u.t0 - 0.3) continue;
           group.add(c);
           u = { s0: Math.min(u.s0, r.s0), s1: Math.max(u.s1, r.s1), t0: Math.min(u.t0, r.t0), t1: Math.max(u.t1, r.t1) };
           grown = true;
         }
       }
-      const offS = (u.s0 + u.s1) / 2 - ps;
-      const offT = (u.t0 + u.t1) / 2 - pt;
       const names = [...group].map((c) => `${c.sw.shell.name}/${c.id}`).join(' + ');
-      if (Math.abs(offS) > 0.5 || Math.abs(offT) > 0.5)
-        add('connector-misaligned', 'error', `Cutout ${names} is offset from ${label} by ${fmt(offS)} mm horizontally and ${fmt(offT)} mm vertically (> 0.5 mm)`, { target: tgt, at: p, suggestion: 'Move the cutout so its centre matches the connector opening centre.' }, comp.componentId);
+      const dedicated = [...group].some((c) => c.linked?.componentId === comp.componentId);
       const ws = u.s1 - u.s0, wt = u.t1 - u.t0;
-      if (ws + 1e-6 < needS + 0.3 || wt + 1e-6 < needT + 0.3)
-        add('connector-cutout-small', 'error', `Cutout ${names} is ${fmt(ws)} × ${fmt(wt)} mm but ${label} needs ≥ ${fmt(needS + 0.3)} × ${fmt(needT + 0.3)} mm (opening + 0.3 mm)`, { target: tgt, at: p, suggestion: `Enlarge the cutout to at least ${fmt(needS + 0.5, 1)} × ${fmt(needT + 0.5, 1)} mm.` }, comp.componentId);
+      if (dedicated) {
+        const offS = (u.s0 + u.s1) / 2 - ps;
+        const offT = (u.t0 + u.t1) / 2 - pt;
+        if (Math.abs(offS) > 0.5 || Math.abs(offT) > 0.5)
+          add('connector-misaligned', 'error', `Cutout ${names} is offset from ${label} by ${fmt(offS)} mm horizontally and ${fmt(offT)} mm vertically (> 0.5 mm)`, { target: tgt, at: p, suggestion: 'Move the cutout so its centre matches the connector opening centre.' }, comp.componentId);
+        if (ws + 1e-6 < needS + 0.3 || wt + 1e-6 < needT + 0.3)
+          add('connector-cutout-small', 'error', `Cutout ${names} is ${fmt(ws)} × ${fmt(wt)} mm but ${label} needs ≥ ${fmt(needS + 0.3)} × ${fmt(needT + 0.3)} mm (opening + 0.3 mm)`, { target: tgt, at: p, suggestion: `Enlarge the cutout to at least ${fmt(needS + 0.5, 1)} × ${fmt(needT + 0.5, 1)} mm.` }, comp.componentId);
+      } else {
+        // shared / unlinked opening: it must contain the connector opening with ≥ 0.15 mm margin
+        const m = 0.15;
+        const short = Math.max(u.s0 - (ps - needS / 2 - m), ps + needS / 2 + m - u.s1, u.t0 - (pt - needT / 2 - m), pt + needT / 2 + m - u.t1);
+        if (short > 1e-6)
+          add('connector-misaligned', 'error', `Opening ${names} does not clear ${label}'s ${fmt(needS)} × ${fmt(needT)} mm opening (+0.15 mm margin) — short by ${fmt(short)} mm`, { target: tgt, at: p, suggestion: 'Enlarge/move the cutout or give the connector its own linked cutout.' }, comp.componentId);
+      }
       const bodyFace = Math.max(...[0, 1, 2, 3, 4, 5, 6, 7].map((k) => v3.dot(apply(comp.m, [k & 1 ? comp.box.max[0] : comp.box.min[0], k & 2 ? comp.box.max[1] : comp.box.min[1], k & 4 ? comp.box.max[2] : comp.box.min[2]]), md)));
       const recess = seeds[0].plane - bodyFace;
       if (recess > 3) add('connector-recessed', 'warning', `${label} mating face is ${fmt(recess)} mm behind the outer wall surface — plugs may not seat`, { target: tgt, at: p, suggestion: 'Move the connector (or the board) toward the wall; ≤ 1–2 mm recess is typical.' }, comp.componentId);

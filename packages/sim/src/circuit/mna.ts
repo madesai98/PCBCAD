@@ -119,6 +119,7 @@ export class MnaSystem {
   newton(opts: { maxIter: number; reltol: number; vntol: number; abstol: number; gminDiag?: number; srcScale?: number }): NewtonResult {
     const { A, b, x, xNew, ctx, diagPos, isBranch } = this;
     const n = this.size;
+    if (n === 0) return { converged: true, iterations: 0 };
     const gd = (opts.gminDiag ?? 0) + GMIN_FLOOR;
     ctx.srcScale = opts.srcScale ?? 1;
     ctx.gmin = GMIN_FLOOR + (opts.gminDiag ?? 0);

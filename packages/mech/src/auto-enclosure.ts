@@ -33,7 +33,7 @@ import type {
   Vec3,
   VentPattern,
 } from '@pcbcad/core';
-import { newId } from '@pcbcad/core';
+import { getMaterial, newId } from '@pcbcad/core';
 import { apply, applyDir } from './mat';
 import { clearanceHole, insertTable, pilotHole } from './fastener';
 import { polyBBox } from './poly';
@@ -243,7 +243,15 @@ export function autoEnclosure(project: Project, boardIds: string[], opts: AutoEn
     for (const p of here) p.z = zLevel;
   }
   const topMost = Math.max(...placedBoards.map((p) => p.z + p.tb + p.hTop));
-  const ceiling = topMost + topClear;
+  // connector openings (centre height above the board surface) need ≥ 1 wall of bridge below the top
+  let openTop = 0;
+  for (const p of placedBoards)
+    for (const c of p.board.components ?? []) {
+      const sp = project.parts?.[c.partId]?.connector;
+      if (c.dnp || !sp?.opening || !sp.matingDirection || sp.matingDirection === '+z' || c.side === 'bottom') continue;
+      openTop = Math.max(openTop, p.z + p.tb + sp.opening.zCenter + (sp.opening.height + 0.5) / 2 + wall);
+    }
+  const ceiling = Math.max(topMost + topClear, openTop);
   const Htot = up1(ceiling + wall);
 
   // ---------------------------------------------------------------- footprint & connectors
@@ -368,7 +376,11 @@ export function autoEnclosure(project: Project, boardIds: string[], opts: AutoEn
   // ---------------------------------------------------------------- shells
   const baseId = newId('mech');
   const coverId = newId('mech');
-  const lipT = r1(Math.max(0.6, 0.4 * wall));
+  // lip/groove must leave ≥ minWall beside the groove (groove = lip + 0.15 mm)
+  const minWall = getMaterial(materialId)?.molding?.minWall ?? 1.0;
+  const lipT = r1(Math.min(Math.max(0.6, 0.4 * wall), wall - minWall - 0.15));
+  const useLip = lipT >= 0.6 - 1e-9;
+  if (!useLip) notes.push(`Wall ${wall} mm is too thin for a lip/groove (needs ≥ ${r1(minWall + 0.75)} mm); halves butt-join — consider wall ≥ ${r1(minWall + 1)} mm`);
   const base: EnclosureShell = {
     id: baseId,
     name: 'Enclosure base',
@@ -381,7 +393,7 @@ export function autoEnclosure(project: Project, boardIds: string[], opts: AutoEn
     wall,
     cornerRadius,
     draftDeg,
-    lip: { kind: 'lip', height: 1.5, thickness: lipT },
+    ...(useLip ? { lip: { kind: 'lip' as const, height: 1.5, thickness: lipT } } : {}),
     bosses: [],
     ribs: [],
     cutouts: [],
@@ -396,7 +408,7 @@ export function autoEnclosure(project: Project, boardIds: string[], opts: AutoEn
     role: 'cover',
     processOptions: { ...base.processOptions },
     outer: { width: W, depth: D, height: Hc },
-    lip: { kind: 'groove', height: 1.65, thickness: r1(lipT + 0.15) },
+    ...(useLip ? { lip: { kind: 'groove' as const, height: 1.65, thickness: r1(lipT + 0.15) } } : { lip: undefined }),
     bosses: [],
     cutouts: [],
     vents: [],
@@ -510,6 +522,22 @@ export function autoEnclosure(project: Project, boardIds: string[], opts: AutoEn
     if (recess > 1) notes.push(`${c.ref} mating face is ${r1(recess)} mm inside the inner wall (${r1(recess + wall)} mm from the outside) — move it to the board edge so the plug reaches`);
     else notes.push(`${c.ref}: mating face ${r1(Math.max(0, recess) + wall)} mm behind the outer surface; a ${wall} mm wall at the opening suits plugs with ≥ ${r1(wall + 6.5)} mm exposed shell — thin the wall locally (outside spot-face) for short plugs`);
   });
+  for (const shell of [base, cover]) {
+    const merged: ShellCutout[] = [];
+    for (const c of shell.cutouts) {
+      const near = merged.find((m) => m.face === c.face && c.u - c.width / 2 < m.u + m.width / 2 + wall && c.u + c.width / 2 > m.u - m.width / 2 - wall && Math.abs(c.v - m.v) < (c.height + m.height) / 2 + wall);
+      if (!near) {
+        merged.push({ ...c });
+        continue;
+      }
+      const u0 = Math.min(near.u - near.width / 2, c.u - c.width / 2), u1 = Math.max(near.u + near.width / 2, c.u + c.width / 2);
+      const v0 = Math.min(near.v - near.height / 2, c.v - c.height / 2), v1 = Math.max(near.v + near.height / 2, c.v + c.height / 2);
+      Object.assign(near, { u: r2((u0 + u1) / 2), v: r2((v0 + v1) / 2), width: r2(u1 - u0), height: r2(v1 - v0) });
+      delete near.linked; // shared opening (checkAssembly verifies it clears every connector)
+      notes.push(`${shell.name}: connector openings ${near.id} and ${c.id} merged into one ${r1(near.width)} × ${r1(near.height)} mm cutout (too close for separate openings)`);
+    }
+    shell.cutouts = merged;
+  }
   if (notchedSplit.length) notes.push(`Connector cutouts ${notchedSplit.join(', ')} straddle the parting plane (open notches in both halves, no side actions)`);
 
   // vents

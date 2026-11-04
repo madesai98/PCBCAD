@@ -508,10 +508,13 @@ async function mixed(
     behaviors: BehaviorScript[];
     uartInput?: Record<string, string>;
     environment?: { temperatureC?: number; pressurePa?: number; humidityPct?: number };
+    /** User-supplied RP2040 bootrom (not bundled for licensing reasons). */
+    rp2040Bootrom?: Uint8Array;
   },
   progress: Progress,
 ) {
   const { createNodeSandbox } = await import('@pcbcad/sim/mixed/sandbox-node');
+  if (p.rp2040Bootrom?.length) sim.setRp2040Bootrom(p.rp2040Bootrom);
   const result: MixedSignalResult = await sim.runMixedSignal(p.project, p.target, {
     duration: p.duration,
     firmware: p.firmware,

@@ -183,10 +183,11 @@ function boardTextures(pcb: PcbScene, side: 'top' | 'bottom', theme: ViewerTheme
   const W = Math.ceil(w * ppm);
   const H = Math.ceil(h * ppm);
   const vp: PcbViewport = { a: ppm, d: -ppm, e: -b.minX * ppm, f: b.maxY * ppm, width: W, height: H, dpr: 1 };
+  // CPU-backed canvases: uploading them as textures avoids GPU read-back stalls.
   const canvas = document.createElement('canvas');
   canvas.width = W;
   canvas.height = H;
-  const ctx = canvas.getContext('2d')!;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
   let buffer: CanvasRenderingContext2D | null = null;
   const thermalImg = thermal && side === 'top' ? buildThermalImage(thermal, 'top') : null;
   drawPcb(ctx, pcb, vp, {
@@ -202,7 +203,7 @@ function boardTextures(pcb: PcbScene, side: 'top' | 'bottom', theme: ViewerTheme
         const c = document.createElement('canvas');
         c.width = W;
         c.height = H;
-        buffer = c.getContext('2d');
+        buffer = c.getContext('2d', { willReadFrequently: true });
       }
       return buffer;
     },
@@ -211,7 +212,7 @@ function boardTextures(pcb: PcbScene, side: 'top' | 'bottom', theme: ViewerTheme
   const rmCanvas = document.createElement('canvas');
   rmCanvas.width = W;
   rmCanvas.height = H;
-  const r = rmCanvas.getContext('2d')!;
+  const r = rmCanvas.getContext('2d', { willReadFrequently: true })!;
   r.fillStyle = thermalImg ? 'rgb(0,150,0)' : 'rgb(0,105,0)';
   r.fillRect(0, 0, W, H);
   if (!thermalImg) {

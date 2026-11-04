@@ -124,7 +124,14 @@ const yieldNow = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
  * Buses are transaction-level: AVR TWI/RP2040 I2C → chip scripts whose SDA/SCL pins share the MCU
  * bus nets (the bus is checked for pull-ups at each START: without them every address is NACKed
  * and a warning explains why); SPI → scripts whose SCK/MOSI match and whose CS is active; UART
- * bytes → text (and to scripts whose RX is on the MCU TX net).
+ * bytes → text (and to scripts whose RX is on the MCU TX net). Bus nets match through ≤ 10 Ω
+ * parts and interconnect conductors.
+ *
+ * Results: `digital` holds every connected MCU pin — driven levels at the exact switch time,
+ * undriven pins the sensed net level (−1 while between VIL and VIH); `indicators` per LED
+ * (on = current ≥ 1 % of If); `avgPower` = time-averaged dissipation (MCU pin output stages
+ * included); `analog` samples power nets and LED nets every `sampleInterval`. Multiple MCUs run in
+ * lock-step quanta of 10 µs. Throws an Error named 'AbortError' when `signal` aborts.
  */
 export async function runMixedSignal(project: Project, target: CircuitTarget, opts: MixedSignalOptions): Promise<MixedSignalRunResult> {
   const wall0 = typeof performance !== 'undefined' ? performance.now() : Date.now();

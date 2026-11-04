@@ -49,7 +49,7 @@ export const airflowTuning: {
   energyCycles: 0,
   pressureTol: 0.1,
   pressureMaxIt: 10,
-  energyTol: 1e-6,
+  energyTol: 3e-4,
   energyMaxIt: 60,
   driftTol: 1e-3,
   momTol: 1e-4,
@@ -628,10 +628,13 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
     const { act, cellL, cellU, nbIdx, nbType, fluxIdx, aNb, aP, b, d, vel } = F;
     const v0 = axes[ax === 0 ? 1 : 0].vel;
     const v1 = axes[ax === 2 ? 1 : 2].vel;
+    const dirT0 = 2 * (ax === 0 ? 1 : 0);
+    const dirT1 = 2 * (ax === 2 ? 1 : 2);
     const gb = -rho * air.beta * gvec[ax] * V;
     const dNormLo = 2 * ax;
     const nA = act.length;
     const D = Dvisc;
+    const halfRhoA = 0.5 * rhoA;
     for (let q = 0; q < nA; q++) {
       const uP = vel[act[q]];
       let apSum = 0;
@@ -640,38 +643,55 @@ export function solveAirflow(setup: AirflowSetup): AirflowResultDetail {
       let nbSum = 0;
       const o6 = q * 6;
       const o8 = q * 8;
-      for (let dir = 0; dir < 6; dir++) {
-        const t = nbType[o6 + dir];
+      // upwind convection + full physical diffusion (aP ≥ ΣD > 0 even next to openings)
+      for (let side = 0; side < 2; side++) {
+        const o = o6 + dNormLo + side;
+        const t = nbType[o];
         if (t === NB_FREE) {
-          aNb[o6 + dir] = 0;
+          aNb[o] = 0;
           continue;
         }
-        if (t === NB_TWALL) {
-          aNb[o6 + dir] = 0;
-          apSum += 2 * D; // no-slip wall at half a cell
-          continue;
-        }
-        const nf = nbIdx[o6 + dir];
-        const side = dir & 1;
-        let Fl: number;
-        if (dir === dNormLo || dir === dNormLo + 1) Fl = rhoA * 0.5 * (uP + vel[nf]);
-        else {
-          const slot = (dir >> 1) === (ax === 0 ? 1 : 0) ? 0 : 1;
-          const vv = slot === 0 ? v0 : v1;
-          const i1 = fluxIdx[o8 + slot * 4 + side * 2];
-          const i2 = fluxIdx[o8 + slot * 4 + side * 2 + 1];
-          Fl = rhoA * 0.5 * ((i1 >= 0 ? vv[i1] : 0) + (i2 >= 0 ? vv[i2] : 0));
-        }
-        // upwind convection + full physical diffusion (aP ≥ ΣD > 0 even next to openings)
+        const vn = vel[nbIdx[o]];
+        const Fl = halfRhoA * (uP + vn);
         const a = D + (side ? (Fl < 0 ? -Fl : 0) : Fl > 0 ? Fl : 0);
         apSum += a;
         if (t === NB_UNKNOWN) {
-          aNb[o6 + dir] = a;
+          aNb[o] = a;
           unk += a;
-          nbSum += a * vel[nf];
+          nbSum += a * vn;
         } else {
-          aNb[o6 + dir] = 0;
-          bSum += a * vel[nf]; // known neighbour (fixed fan face or wall-normal face, value 0)
+          aNb[o] = 0;
+          bSum += a * vn; // known neighbour: fixed fan face or wall-normal face (0)
+        }
+      }
+      for (let slot = 0; slot < 2; slot++) {
+        const vv = slot ? v1 : v0;
+        const dbase = slot ? dirT1 : dirT0;
+        for (let side = 0; side < 2; side++) {
+          const o = o6 + dbase + side;
+          const t = nbType[o];
+          if (t === NB_FREE) {
+            aNb[o] = 0;
+            continue;
+          }
+          if (t === NB_TWALL) {
+            aNb[o] = 0;
+            apSum += 2 * D; // no-slip wall at half a cell
+            continue;
+          }
+          const fo = o8 + slot * 4 + side * 2;
+          const Fl = halfRhoA * (vv[fluxIdx[fo]] + vv[fluxIdx[fo + 1]]);
+          const a = D + (side ? (Fl < 0 ? -Fl : 0) : Fl > 0 ? Fl : 0);
+          const vn = vel[nbIdx[o]];
+          apSum += a;
+          if (t === NB_UNKNOWN) {
+            aNb[o] = a;
+            unk += a;
+            nbSum += a * vn;
+          } else {
+            aNb[o] = 0;
+            bSum += a * vn;
+          }
         }
       }
       const cl = cellL[q];

@@ -56,7 +56,9 @@ static FILE uart_out = FDEV_SETUP_STREAM(uart_putchar, NULL, _FDEV_SETUP_WRITE);
 
 static void uart_init(void) {
   UCSR0A = _BV(U2X0);
-  UBRR0 = (F_CPU / 8 / 115200UL) - 1; /* 16 -> 117647 baud (-2.1 %), the usual Arduino setting */
+  /* rounded divisor: 16 MHz -> UBRR 16 (117647 baud, -2.1 %, the usual Arduino setting);
+     8 MHz (3.3 V, internal RC) -> UBRR 8 (111111 baud, -3.5 %) */
+  UBRR0 = (uint16_t)((F_CPU + 4UL * 115200UL) / (8UL * 115200UL) - 1);
   UCSR0B = _BV(TXEN0) | _BV(RXEN0);
   UCSR0C = _BV(UCSZ01) | _BV(UCSZ00); /* 8N1 */
   stdout = &uart_out;
@@ -218,7 +220,7 @@ int main(void) {
   timebase_init();
   sei();
 
-  printf("\r\nenv-sensor 1.0 (ATmega328P @ 16 MHz, BME280 @ 0x76)\r\n");
+  printf("\r\nenv-sensor 1.0 (ATmega328P @ %lu MHz, BME280 @ 0x76)\r\n", (unsigned long)(F_CPU / 1000000UL));
 
   uint8_t id = 0;
   if (!bme_read(0xD0, &id, 1)) printf("BME280: no ACK at 0x76 (check wiring / pull-ups)\r\n");

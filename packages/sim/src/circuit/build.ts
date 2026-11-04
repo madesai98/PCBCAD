@@ -557,7 +557,8 @@ export function buildCircuit(project: Project, target: CircuitTarget, opts: Buil
           break;
         }
       }
-      if (!g.size) warnings.push(`${b.name}: no ground net found — node voltages are floating (referenced through 1 GΩ leaks)`);
+      if (!g.size && b.components.some((c) => !c.dnp && Object.keys(c.pinNets).length))
+        warnings.push(`${b.name}: no ground net found — node voltages are floating (referenced through 1 GΩ leaks)`);
     }
     groundNets.set(b.id, g);
   }
@@ -692,6 +693,27 @@ export function buildCircuit(project: Project, target: CircuitTarget, opts: Buil
         nodes: { p: nodeA, n: nodeB },
         params: { R: Math.max(l.resistance, 1e-4) },
       });
+    }
+  }
+
+  // loops of ideal voltage sources (e.g. two ideal supplies in parallel) make the MNA matrix
+  // singular: break each loop with 1 mΩ of internal resistance and say so.
+  {
+    const vp = new Map<string, string>();
+    const vf = (a: string): string => {
+      let r = a;
+      while (vp.has(r) && vp.get(r) !== r) r = vp.get(r)!;
+      return r;
+    };
+    for (const d of devices) {
+      if (d.kind !== 'vsource' || Number(d.params.Rint) > 0) continue;
+      const a = vf(d.nodes.p);
+      const b = vf(d.nodes.n);
+      if (a === b) {
+        d.params.Rint = 1e-3;
+        const ref = d.componentId ? components[d.componentId]?.ref ?? d.id : d.id;
+        warnings.push(`${ref}: ideal voltage source closes a loop of ideal sources (sources in parallel?) — 1 mΩ internal resistance added; set simOverrides.Rint for a realistic value`);
+      } else vp.set(a, b);
     }
   }
 

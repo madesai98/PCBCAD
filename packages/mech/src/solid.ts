@@ -9,8 +9,8 @@
  * Both use the same polygons, so they agree to within discretisation.
  *
  * Matrices are row-major (core convention); `m` maps the node's local frame into its parent's frame.
- * Prism semantics: `outer` minus the union of `holes` (holes may cross the outline), extruded along
- * local +Z from z0 to z1. Membership tests are half-open ([z0, z1)) so touching solids never double
+ * Prism semantics: `outer` (even-odd filled, so self-intersecting input is well defined) minus the
+ * union of `holes` (each even-odd; holes may cross the outline), extruded along local +Z from z0 to z1. Membership tests are half-open ([z0, z1)) so touching solids never double
  * count a sample.
  */
 import type { BBox3, Mat4, Vec2, Vec3 } from '@pcbcad/core';
@@ -693,9 +693,13 @@ export function solidToManifold(s: Solid, w: ManifoldToplevel, arena: Arena): Ma
   switch (s.kind) {
     case 'prism': {
       if (s.outer.length < 3 || !(s.z1 > s.z0)) return null;
-      let cs = arena.add(new CrossSection([s.outer as [number, number][]], 'NonZero'));
+      // even-odd per polygon (self-intersecting input behaves like pointInPoly), holes = union
+      let cs = arena.add(new CrossSection([s.outer as [number, number][]], 'EvenOdd'));
       const holes = (s.holes ?? []).filter((h) => h.length >= 3);
-      if (holes.length) cs = arena.add(cs.subtract(arena.add(new CrossSection(holes as [number, number][][], 'NonZero'))));
+      if (holes.length) {
+        const hs = holes.map((h) => arena.add(new CrossSection([h as [number, number][]], 'EvenOdd')));
+        cs = arena.add(cs.subtract(hs.length === 1 ? hs[0] : arena.add(CrossSection.union(hs))));
+      }
       if (cs.isEmpty()) return null;
       man = arena.add(cs.extrude(s.z1 - s.z0));
       if (s.z0 !== 0) man = arena.add(man.translate([0, 0, s.z0]));
@@ -732,7 +736,7 @@ export function solidToManifold(s: Solid, w: ManifoldToplevel, arena: Arena): Ma
       break;
     case 'revolve': {
       if (s.profile.length < 3) return null;
-      const cs = arena.add(new CrossSection([s.profile as [number, number][]], 'NonZero'));
+      const cs = arena.add(new CrossSection([s.profile as [number, number][]], 'EvenOdd'));
       const rmax = Math.max(...s.profile.map((p) => p[0]));
       man = arena.add(cs.revolve(s.segments ?? circleSegments(rmax)));
       break;

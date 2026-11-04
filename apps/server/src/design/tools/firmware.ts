@@ -62,6 +62,16 @@ export function firmwareMap(ctx: ToolContext, p: Project, boardIds?: string[]) {
   return { firmware: out, missing };
 }
 
+/**
+ * The RP2040 boot ROM is not redistributed with PCBCAD (part of it is licensed only for use on
+ * RP2040 silicon or under GPLv2). Users who need pico-sdk / MicroPython images can drop their own
+ * copy at <dataDir>/rp2040-bootrom.bin; bare-metal images run without it.
+ */
+function rp2040Bootrom(ctx: ToolContext): Uint8Array | undefined {
+  const f = path.join(ctx.services.store.dataDir, 'rp2040-bootrom.bin');
+  return fs.existsSync(f) ? new Uint8Array(fs.readFileSync(f)) : undefined;
+}
+
 function scriptingApiDoc(): string {
   const candidates = [path.join(REPO_ROOT, 'packages', 'sim', 'src', 'mixed', 'README.md'), path.join(SERVER_ROOT, 'dist', 'scripting-api.md')];
   for (const c of candidates) if (fs.existsSync(c)) return fs.readFileSync(c, 'utf8');
@@ -283,7 +293,7 @@ export const firmwareTools: ToolDef[] = [
         target: 'system' in t.target ? { system: true } : { boardId: t.target.boardId },
         params: { duration, environment: a.environment },
         task: 'mixed',
-        payload: { project: p, target: t.target, duration, firmware, behaviors: p.behaviors, uartInput, environment: a.environment },
+        payload: { project: p, target: t.target, duration, firmware, behaviors: p.behaviors, uartInput, environment: a.environment, rp2040Bootrom: rp2040Bootrom(ctx) },
         timeoutMs: 10 * 60_000,
       });
       return [out.text, missing.length ? `MCUs without firmware (held idle): ${missing.join(', ')}` : ''].filter(Boolean).join('\n');
